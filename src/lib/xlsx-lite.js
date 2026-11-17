@@ -199,20 +199,18 @@
     { f: 0, fl: 0, b: 1, n: 0 }, // 5 текст
     { f: 0, fl: 0, b: 1, n: 0, h: 'center' }, // 6 по центру
     { f: 2, fl: 0, b: 1, n: 0 }, // 7 жирный текст
-    { f: 2, fl: 0, b: 1, n: 166, h: 'right' }, // 8 жирные деньги
-    { f: 3, fl: 0, b: 0, n: 0 }, // 9 заголовок
-    { f: 4, fl: 0, b: 0, n: 0 }, // 10 приглушённый
-    { f: 2, fl: 4, b: 1, n: 0 }, // 11 итог: подпись
-    { f: 2, fl: 4, b: 1, n: 166, h: 'right' }, // 12 итог: деньги
-    { f: 0, fl: 0, b: 1, n: 167, h: 'right' }, // 13 проценты
-    { f: 0, fl: 3, b: 1, n: 0 }, // 14 зебра: текст
-    { f: 0, fl: 3, b: 1, n: 166, h: 'right' }, // 15 зебра: деньги
-    { f: 0, fl: 3, b: 1, n: 164, h: 'center' }, // 16 зебра: дата
-    { f: 0, fl: 3, b: 1, n: 165, h: 'center' }, // 17 зебра: время
-    { f: 0, fl: 3, b: 1, n: 0, h: 'center' }, // 18 зебра: по центру
-    { f: 2, fl: 0, b: 0, n: 166, h: 'right' }, // 19 жирные деньги без рамки
-    { f: 1, fl: 2, b: 1, n: 0 }, // 20 шапка с рамкой (слева)
-    { f: 0, fl: 0, b: 1, n: 0, h: 'right' }, // 21 число справа
+    { f: 3, fl: 0, b: 0, n: 0 }, // 8 заголовок
+    { f: 4, fl: 0, b: 0, n: 0 }, // 9 приглушённый
+    { f: 2, fl: 4, b: 1, n: 0 }, // 10 итог: подпись
+    { f: 2, fl: 4, b: 1, n: 166, h: 'right' }, // 11 итог: деньги
+    { f: 0, fl: 0, b: 1, n: 167, h: 'right' }, // 12 проценты
+    { f: 0, fl: 3, b: 1, n: 0 }, // 13 зебра: текст
+    { f: 0, fl: 3, b: 1, n: 166, h: 'right' }, // 14 зебра: деньги
+    { f: 0, fl: 3, b: 1, n: 164, h: 'center' }, // 15 зебра: дата
+    { f: 0, fl: 3, b: 1, n: 165, h: 'center' }, // 16 зебра: время
+    { f: 0, fl: 3, b: 1, n: 0, h: 'center' }, // 17 зебра: по центру
+    { f: 2, fl: 0, b: 0, n: 166, h: 'right' }, // 18 жирные деньги без рамки
+    { f: 1, fl: 2, b: 1, n: 0 }, // 19 шапка с рамкой (слева)
   ];
 
   const STYLE = {
@@ -224,20 +222,18 @@
     TEXT: 5,
     CENTER: 6,
     BOLD: 7,
-    BOLD_MONEY: 8,
-    TITLE: 9,
-    MUTED: 10,
-    TOTAL_LABEL: 11,
-    TOTAL_MONEY: 12,
-    PERCENT: 13,
-    ZEBRA_TEXT: 14,
-    ZEBRA_MONEY: 15,
-    ZEBRA_DATE: 16,
-    ZEBRA_TIME: 17,
-    ZEBRA_CENTER: 18,
-    BOLD_MONEY_PLAIN: 19,
-    HEADER_BORDERED: 20,
-    NUMBER_RIGHT: 21,
+    TITLE: 8,
+    MUTED: 9,
+    TOTAL_LABEL: 10,
+    TOTAL_MONEY: 11,
+    PERCENT: 12,
+    ZEBRA_TEXT: 13,
+    ZEBRA_MONEY: 14,
+    ZEBRA_DATE: 15,
+    ZEBRA_TIME: 16,
+    ZEBRA_CENTER: 17,
+    BOLD_MONEY_PLAIN: 18,
+    HEADER_BORDERED: 19,
   };
 
   function xfXml(xf) {

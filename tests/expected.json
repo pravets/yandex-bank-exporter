@@ -1,0 +1,135 @@
+{
+  "description": "Ожидания для tests/fixture.mjs, выписаны вручную в копейках. Verifier не вычисляет эталон из production-преобразований.",
+  "operations": [
+    {
+      "n": 1,
+      "date": "2026-01-10",
+      "kind": "Расход",
+      "direction": "Списание",
+      "amountKopecks": 300,
+      "month": "2026-01",
+      "category": "Супермаркеты",
+      "account": "Карта Пэй",
+      "status": "Проведено",
+      "pointsKopecks": null,
+      "cashbackKopecks": 0
+    },
+    {
+      "n": 2,
+      "date": "2026-02-05",
+      "kind": "Расход",
+      "direction": "Списание",
+      "amountKopecks": 1050,
+      "month": "2026-02",
+      "category": "Аптеки",
+      "account": "Карта Пэй",
+      "status": "Проведено",
+      "pointsKopecks": null,
+      "cashbackKopecks": null
+    },
+    {
+      "n": 3,
+      "date": "2026-01-20",
+      "kind": "Перевод",
+      "direction": "Списание",
+      "amountKopecks": 10000,
+      "month": "2026-01",
+      "category": "Перевод",
+      "account": "Карта Пэй",
+      "status": "Проведено",
+      "pointsKopecks": null,
+      "cashbackKopecks": null
+    },
+    {
+      "n": 4,
+      "date": "2026-01-21",
+      "kind": "Перевод",
+      "direction": "Поступление",
+      "amountKopecks": 2500,
+      "month": "2026-01",
+      "category": "Перевод",
+      "account": "Карта Пэй",
+      "status": "Проведено",
+      "pointsKopecks": null,
+      "cashbackKopecks": null
+    },
+    {
+      "n": 5,
+      "date": "2026-03-01",
+      "kind": "Перевод между счетами",
+      "direction": "Списание",
+      "amountKopecks": 4000000,
+      "month": "2026-03",
+      "category": "Перевод между счетами",
+      "account": "Счёт",
+      "status": "Проведено",
+      "pointsKopecks": null,
+      "cashbackKopecks": null
+    },
+    {
+      "n": 6,
+      "date": "2026-02-25",
+      "kind": "Доход",
+      "direction": "Поступление",
+      "amountKopecks": 3,
+      "month": "2026-02",
+      "category": "Пополнение",
+      "account": "Карта Пэй",
+      "status": "Проведено",
+      "pointsKopecks": null,
+      "cashbackKopecks": null
+    },
+    {
+      "n": 7,
+      "date": "2026-01-31",
+      "kind": "Расход",
+      "direction": "Списание",
+      "amountKopecks": 700,
+      "month": "2026-01",
+      "category": "Рестораны и кафе",
+      "account": "Карта Пэй",
+      "status": "Отменено",
+      "pointsKopecks": null,
+      "cashbackKopecks": null
+    },
+    {
+      "n": 8,
+      "date": "2026-03-02",
+      "kind": "Баллы",
+      "direction": "Списание",
+      "amountKopecks": null,
+      "month": "2026-03",
+      "category": "Списание баллов",
+      "account": "Карта Пэй",
+      "status": "Проведено",
+      "pointsKopecks": -50000,
+      "cashbackKopecks": null
+    }
+  ],
+  "kpiKopecks": {
+    "Расходы (покупки и услуги), ₽": 1350,
+    "Переводы исходящие, ₽": 4010000,
+    "Всего списаний, ₽": 4011350,
+    "Поступления (доходы), ₽": 3,
+    "Переводы входящие, ₽": 2500,
+    "Кешбэк начислено, баллы": 0,
+    "Списано баллов": 50000,
+    "Начислено баллов": 0
+  },
+  "totals": {
+    "n": 7,
+    "exp": 1350,
+    "trOut": 4010000,
+    "inc": 3,
+    "cb": 0
+  },
+  "months": [
+    { "label": "янв 2026", "n": 3, "exp": 300, "trOut": 10000, "inc": 0, "cb": 0 },
+    { "label": "фев 2026", "n": 2, "exp": 1050, "trOut": 0, "inc": 3, "cb": 0 },
+    { "label": "мар 2026", "n": 2, "exp": 0, "trOut": 4000000, "inc": 0, "cb": 0 }
+  ],
+  "categories": [
+    { "name": "Аптеки", "amountKopecks": 1050, "n": 1 },
+    { "name": "Супермаркеты", "amountKopecks": 300, "n": 1 }
+  ]
+}

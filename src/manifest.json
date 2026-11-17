@@ -23,7 +23,7 @@
   "content_scripts": [
     {
       "matches": ["https://bank.yandex.ru/*"],
-      "js": ["content.js"],
+      "js": ["lib/deep-paths.js", "content.js"],
       "run_at": "document_start",
       "world": "MAIN"
     }

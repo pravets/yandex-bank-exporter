@@ -19,6 +19,9 @@ export function loadPopup({ getElementById = () => null } = {}) {
   vm.runInThisContext(readFileSync(join(ext, 'lib', 'xlsx-lite.js'), 'utf8'), {
     filename: 'xlsx-lite.js',
   });
+  vm.runInThisContext(readFileSync(join(ext, 'lib', 'deep-paths.js'), 'utf8'), {
+    filename: 'deep-paths.js',
+  });
   vm.runInThisContext(popupSource.slice(0, cut), { filename: 'popup.js' });
 
   return globalThis;

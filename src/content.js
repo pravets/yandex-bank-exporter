@@ -18,7 +18,6 @@
   const SAMPLE_STRING_LIMIT = 2000;
   const SAMPLE_SIZE_LIMIT = 150 * 1024;
   const MAX_OPERATIONS = 12;
-  const OPERATION_RESPONSE_LIMIT = 30 * 1024;
 
   const capture = {
     body: null, // исходный JSON-строкой
@@ -58,24 +57,8 @@
     return out;
   }
 
-  // Пути вида `account.title`, `items[].card.mask` — чтобы глазами найти нужное поле.
-  function collectPaths(items) {
-    const paths = new Set();
-    const walk = (value, prefix, depth) => {
-      if (!value || typeof value !== 'object' || depth > 4) return;
-      if (Array.isArray(value)) {
-        if (value.length) walk(value[0], prefix + '[]', depth + 1);
-        return;
-      }
-      for (const key of Object.keys(value)) {
-        const path = prefix ? prefix + '.' + key : key;
-        paths.add(path);
-        walk(value[key], path, depth + 1);
-      }
-    };
-    for (const item of items) walk(item, '', 0);
-    return [...paths].sort();
-  }
+  // Пути вида `account.title`, `items[].card.mask` собирает общий lib/deep-paths.js:
+  // он подключён в manifest до content.js, чтобы не держать вторую копию.
 
   function captureResponse(json, request) {
     const feed = json && json.data && json.data.getTransactionsFeedView;
@@ -84,7 +67,7 @@
     const items = feed.items.slice(0, SAMPLE_ITEMS).map((item) => trimDeep(item, 0));
     const sample = {
       items,
-      paths: collectPaths(items),
+      paths: DeepPaths.paths(items),
       feedKeys: Object.keys(feed),
       itemCount: feed.items.length,
       request,
@@ -92,7 +75,7 @@
     // Совсем неожиданно огромный item — оставляем только первую операцию.
     if (JSON.stringify(sample).length > SAMPLE_SIZE_LIMIT) {
       sample.items = sample.items.slice(0, 1);
-      sample.paths = collectPaths(sample.items);
+      sample.paths = DeepPaths.paths(sample.items);
     }
 
     capture.responseSample = sample;
@@ -135,21 +118,6 @@
       capture.filtersAt = Date.now();
     } catch (e) {
       /* список фильтров необязателен */
-    }
-  }
-
-  function recordOperationResponse(record, json) {
-    try {
-      const cleaned = trimDeep(json, 0);
-      record.responseKeys = collectPaths([cleaned]);
-      const serialized = JSON.stringify(cleaned);
-      record.response =
-        serialized.length > OPERATION_RESPONSE_LIMIT
-          ? { truncated: true, note: 'Ответ больше лимита, сохранены только пути полей' }
-          : cleaned;
-    } catch (e) {
-      record.responseKeys = null;
-      record.response = null;
     }
   }
 

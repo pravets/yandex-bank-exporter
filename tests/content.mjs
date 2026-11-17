@@ -8,6 +8,7 @@ import vm from 'node:vm';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '..', 'src', 'content.js'), 'utf8');
+const deepPaths = readFileSync(join(here, '..', 'src', 'lib', 'deep-paths.js'), 'utf8');
 
 function makePage() {
   const calls = { clone: 0, json: 0 };
@@ -48,6 +49,7 @@ function makePage() {
     return Promise.resolve(response);
   };
   vm.createContext(sandbox);
+  vm.runInContext(deepPaths, sandbox, { filename: 'deep-paths.js' });
   vm.runInContext(source, sandbox, { filename: 'content.js' });
   return { sandbox, calls };
 }

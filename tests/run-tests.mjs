@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 
 import { loadPopup } from './load-popup.mjs';
+import { RAW_ITEMS, writeFixtureWorkbook } from './fixture.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Образец отчёта пишем в temp: тест не должен зависеть от прав на рабочую папку
@@ -318,6 +319,49 @@ if (skipped.length) {
   process.stderr.write(`WARN: не выполнено проверок: ${skipped.length} (${skipped.join(', ')}).\n`);
 }
 
+// ---------- фикстура с независимыми ожиданиями ----------
+// Числа в tests/expected.json написаны вручную; verifier сверяет с ними книгу,
+// не пересчитывая эталон из тех же production-преобразований.
+const fixtureFile =
+  process.env.TEST_FIXTURE_FILE || join(tmpdir(), 'yandex-pay-fixture-report.xlsx');
+writeFixtureWorkbook(fixtureFile, globalThis);
+const expectedFile = join(here, 'expected.json');
+
+/** Запускает python-verifier; песочница может запрещать дочерние процессы. */
+function runVerifier(target, expectedPath) {
+  const args = [join(here, 'verify.py'), target];
+  if (expectedPath) args.push(expectedPath);
+  for (const python of ['python', 'python3']) {
+    const result = spawnSync(python, args, {
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    });
+    if (result.error && result.error.code === 'ENOENT') continue;
+    if (result.error) {
+      skipped.push(`verify.py (${target})`);
+      return 'skipped';
+    }
+    if (result.status !== 0) {
+      process.stderr.write(
+        `verify.py упал (${target}):\n${result.stdout || ''}${result.stderr || ''}\n`,
+      );
+      process.exit(1);
+    }
+    return 'ok';
+  }
+  skipped.push(`verify.py (${target})`);
+  return 'skipped';
+}
+
+const verifierFixture = runVerifier(fixtureFile, expectedFile);
+const verifierMain = runVerifier(outFile, null);
+if (skipped.length) {
+  process.stderr.write(
+    `WARN: не выполнено проверок: ${skipped.length} (${skipped.join(', ')}). ` +
+      'Проверьте вручную: python tests/verify.py <xlsx> [expected.json].\n',
+  );
+}
+
 console.log(
   JSON.stringify(
     {
@@ -326,6 +370,8 @@ console.log(
       sheets: sheets.map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
       expected,
       firstRow: sheets[0].rows[1],
+      fixtureFile,
+      verifier: { fixture: verifierFixture, main: verifierMain },
       skipped,
     },
     null,

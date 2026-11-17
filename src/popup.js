@@ -892,7 +892,8 @@ function buildSheets(rows, meta) {
       { v: name, s: S.TEXT },
       { v: round2(data.exp), s: S.MONEY },
       { v: data.n, s: S.CENTER },
-      { v: totals.exp ? data.exp / totals.exp : 0, s: S.PERCENT },
+      // Долю считаем от округлённых копеек: так она согласована со сводными суммами.
+      { v: totals.exp ? round2(data.exp) / round2(totals.exp) : 0, s: S.PERCENT },
     ]);
   }
 
@@ -955,24 +956,6 @@ function hasResponseSample(capture) {
     Array.isArray(capture.responseSample.items) &&
     capture.responseSample.items.length
   );
-}
-
-function collectKeyPaths(items) {
-  const paths = new Set();
-  const walk = (value, prefix, depth) => {
-    if (!value || typeof value !== 'object' || depth > 4) return;
-    if (Array.isArray(value)) {
-      if (value.length) walk(value[0], prefix + '[]', depth + 1);
-      return;
-    }
-    for (const key of Object.keys(value)) {
-      const path = prefix ? prefix + '.' + key : key;
-      paths.add(path);
-      walk(value[key], path, depth + 1);
-    }
-  };
-  for (const item of items || []) walk(item, '', 0);
-  return [...paths].sort();
 }
 
 function filterIdFromUrl(url) {
@@ -1107,7 +1090,7 @@ function buildDiagnostics(capture, tabUrl, version, now, options) {
     paths:
       sample && Array.isArray(sample.paths) && sample.paths.length
         ? sample.paths
-        : collectKeyPaths(rawItems),
+        : DeepPaths.paths(rawItems),
   };
 }
 
@@ -1193,7 +1176,7 @@ async function downloadDiagnostics() {
           responseAt: Date.now(),
           responseSample: {
             items: sample.items,
-            paths: collectKeyPaths(sample.items),
+            paths: DeepPaths.paths(sample.items),
             feedKeys: sample.feedKeys || [],
             itemCount: sample.items.length,
             request: { agreementId: capture.agreementId || '', filterType: null },
