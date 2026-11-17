@@ -24,6 +24,11 @@ const state = {
 
 // ------------------------------------------------------------------ утилиты
 
+// МСК — фиксированный UTC+3, перехода на летнее время нет. Поэтому московский
+// календарный день переводится в момент времени простым смещением, без локальной
+// зоны браузера: Date.UTC(y, m - 1, d) - 3 ч.
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+
 const mskFormat = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Europe/Moscow',
   year: 'numeric',
@@ -34,13 +39,52 @@ const mskFormat = new Intl.DateTimeFormat('en-GB', {
   hour12: false,
 });
 
-function mskParts(iso) {
-  const date = new Date(iso);
+function mskPartsFromDate(date) {
   const parts = mskFormat.formatToParts(date);
   const pick = (type) => Number(parts.find((p) => p.type === type).value);
   let hour = pick('hour');
   if (hour === 24) hour = 0;
   return { year: pick('year'), month: pick('month'), day: pick('day'), hour, minute: pick('minute') };
+}
+
+function mskParts(iso) {
+  return mskPartsFromDate(new Date(iso));
+}
+
+/** Начало московского календарного дня (00:00:00.000 МСК) как момент времени. */
+function mskDayStart(parts) {
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day) - MSK_OFFSET_MS);
+}
+
+/** Начало следующего московского дня — исключительная верхняя граница периода. */
+function mskDayAfter(parts) {
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1) - MSK_OFFSET_MS);
+}
+
+/** Строгий разбор значения <input type="date">: "YYYY-MM-DD" -> части дня по МСК. */
+function parseMskInputDay(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = mskDayStart({ year, month, day });
+  const back = mskPartsFromDate(probe);
+  if (back.year !== year || back.month !== month || back.day !== day) return null;
+  return { year, month, day };
+}
+
+/** Значение <input type="date"> для текущего московского дня. */
+function mskDateInputValue(date) {
+  const parts = mskPartsFromDate(date);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
+/** Значения по умолчанию: начало текущего МСК-года и текущий МСК-день. */
+function defaultDateRange(now = new Date()) {
+  const today = mskPartsFromDate(now);
+  return { from: `${today.year}-01-01`, to: mskDateInputValue(now) };
 }
 
 function setStatus(text, kind) {
@@ -359,33 +403,59 @@ function mapItem(item) {
   };
 }
 
-function getPeriod() {
+/**
+ * Период экспорта — всегда московские календарные дни.
+ * Интервал полуоткрытый: [from, toExclusive); null означает открытую границу.
+ */
+function getPeriod(now = new Date()) {
   const mode = $('period').value;
-  const now = new Date();
+  const year = mskPartsFromDate(now).year;
 
   if (mode === 'current') {
-    return { from: new Date(now.getFullYear(), 0, 1), to: null, label: String(now.getFullYear()) };
+    return {
+      from: mskDayStart({ year, month: 1, day: 1 }),
+      toExclusive: null,
+      label: String(year),
+      invalidReason: null,
+    };
   }
   if (mode === 'prev') {
-    const year = now.getFullYear() - 1;
+    const prevYear = year - 1;
     return {
-      from: new Date(year, 0, 1),
-      to: new Date(year, 11, 31, 23, 59, 59),
-      label: String(year),
+      from: mskDayStart({ year: prevYear, month: 1, day: 1 }),
+      toExclusive: mskDayStart({ year, month: 1, day: 1 }),
+      label: String(prevYear),
+      invalidReason: null,
     };
   }
   if (mode === 'custom') {
-    const from = $('dateFrom').value ? new Date($('dateFrom').value + 'T00:00:00') : null;
-    const to = $('dateTo').value ? new Date($('dateTo').value + 'T23:59:59') : null;
-    const fmt = (d) => (d ? d.toISOString().slice(0, 10) : '');
-    return { from, to, label: `${fmt(from) || 'начало'}_${fmt(to) || 'сегодня'}` };
+    const rawFrom = $('dateFrom').value.trim();
+    const rawTo = $('dateTo').value.trim();
+    const label = `${rawFrom || 'начало'}_${rawTo || 'сегодня'}`;
+
+    if (rawFrom && !parseMskInputDay(rawFrom)) {
+      return { from: null, toExclusive: null, label, invalidReason: 'Некорректная дата в поле «С».' };
+    }
+    if (rawTo && !parseMskInputDay(rawTo)) {
+      return { from: null, toExclusive: null, label, invalidReason: 'Некорректная дата в поле «По».' };
+    }
+
+    const from = rawFrom ? mskDayStart(parseMskInputDay(rawFrom)) : null;
+    const toExclusive = rawTo ? mskDayAfter(parseMskInputDay(rawTo)) : null;
+    const invalidReason =
+      from && toExclusive && from.getTime() >= toExclusive.getTime()
+        ? 'Период задан в обратном порядке: «С» позже «По». Исправьте даты.'
+        : null;
+
+    return { from, toExclusive, label, invalidReason };
   }
-  return { from: null, to: null, label: 'всё время' };
+  return { from: null, toExclusive: null, label: 'всё время', invalidReason: null };
 }
 
 function inPeriod(row, period) {
+  if (!Number.isFinite(row.time)) return !(period.from || period.toExclusive);
   if (period.from && row.time < period.from.getTime()) return false;
-  if (period.to && row.time > period.to.getTime()) return false;
+  if (period.toExclusive && row.time >= period.toExclusive.getTime()) return false;
   return true;
 }
 
@@ -717,6 +787,23 @@ async function downloadWorkbook(sheets, filename) {
   );
 }
 
+/**
+ * Часть имени файла: сохраняем буквы (включая кириллицу), цифры, точку, дефис и
+ * подчёркивание. Всё остальное — включая запрещённые файловой системой символы —
+ * заменяем на "_". Пустой результат превращаем в "период".
+ */
+function sanitizeFilePart(text) {
+  const cleaned = String(text == null ? '' : text)
+    .replace(/[^\p{L}\p{N}._-]+/gu, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  return cleaned || 'период';
+}
+
+function buildReportFilename(periodLabel) {
+  return `Яндекс_Пэй_${sanitizeFilePart(periodLabel)}.xlsx`;
+}
+
 // ------------------------------------------------------------------ диагностика
 
 function hasResponseSample(capture) {
@@ -915,6 +1002,14 @@ async function downloadDiagnostics() {
 
 async function run() {
   if (state.busy) return;
+
+  // Календарный контракт МСК проверяем до любых сетевых запросов истории.
+  const period = getPeriod();
+  if (period.invalidReason) {
+    setStatus(period.invalidReason, 'error');
+    return;
+  }
+
   if (!state.tabId) {
     setStatus('Сначала откройте страницу истории платежей — без неё расширение не узнает параметры запроса.', 'warn');
     return;
@@ -934,7 +1029,6 @@ async function run() {
   show('retry', false);
 
   try {
-    const period = getPeriod();
     const includeTransfers = $('withTransfers').checked;
     const includeForeignCards = $('withForeignCards').checked;
 
@@ -1045,7 +1139,7 @@ async function run() {
       skipped: notes.join(' '),
     });
 
-    const filename = `Яндекс_Пэй_${period.label.replace(/[^\w.\-]+/g, '_')}.xlsx`;
+    const filename = buildReportFilename(period.label);
     const size = await downloadWorkbook(sheets, filename);
 
     progress(100, `Готово: ${filename} (${Math.round(size / 1024)} КБ)`);
@@ -1162,10 +1256,12 @@ function init() {
   if (initialized) return;
   initialized = true;
   const now = new Date();
-  $('optCurrent').textContent = `Текущий год (${now.getFullYear()})`;
-  $('optPrev').textContent = `Прошлый год (${now.getFullYear() - 1})`;
-  $('dateFrom').value = `${now.getFullYear()}-01-01`;
-  $('dateTo').value = now.toISOString().slice(0, 10);
+  const today = mskPartsFromDate(now);
+  const defaults = defaultDateRange(now);
+  $('optCurrent').textContent = `Текущий год (${today.year})`;
+  $('optPrev').textContent = `Прошлый год (${today.year - 1})`;
+  $('dateFrom').value = defaults.from;
+  $('dateTo').value = defaults.to;
 
   $('period').addEventListener('change', () => {
     show('dates', $('period').value === 'custom');

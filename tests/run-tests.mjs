@@ -1,30 +1,20 @@
 // Проверка кода расширения без Chrome: грузим xlsx-lite.js и popup.js в этот процесс,
 // собираем отчёт из синтетических "сырых" операций GraphQL и пишем .xlsx.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import vm from 'node:vm';
+
+import { loadPopup } from './load-popup.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const ext = join(here, '..', 'src');
 // Образец отчёта пишем в temp: тест не должен зависеть от прав на рабочую папку
 // и не должен засорять репозиторий. Путь можно переопределить через TEST_OUT_FILE.
 const outFile = process.env.TEST_OUT_FILE || join(tmpdir(), 'yandex-pay-sample-report.xlsx');
 
-// popup.js в конце вызывает init() — в тесте это не нужно и тянет за собой DOM/chrome.
-const popupSource = readFileSync(join(ext, 'popup.js'), 'utf8');
-const cut = popupSource.indexOf("document.addEventListener('DOMContentLoaded', init);");
-if (cut === -1) throw new Error('не нашёл точку входа popup.js');
-const popupForTest = popupSource.slice(0, cut);
-
-globalThis.document = { addEventListener() {}, readyState: 'loading', getElementById: () => null };
-
-vm.runInThisContext(readFileSync(join(ext, 'lib', 'xlsx-lite.js'), 'utf8'), {
-  filename: 'xlsx-lite.js',
-});
-vm.runInThisContext(popupForTest, { filename: 'popup.js' });
+loadPopup({ getElementById: () => null });
 
 if (typeof globalThis.mapItem !== 'function') throw new Error('mapItem не загрузился');
 if (typeof globalThis.buildSheets !== 'function') throw new Error('buildSheets не загрузился');
@@ -256,6 +246,37 @@ assert.equal(noSample.request.filterType, 'PAY_CARD');
 assert.equal(noSample.request.filterIdFromUrl, '');
 assert.equal(noSample.generatedAt, '1970-01-01T00:00:00.000Z');
 assert.deepEqual(noSample.paths, []);
+
+// ---------- календарный контракт в разных локальных зонах ----------
+// TZ нельзя надёжно поменять внутри процесса (особенно на Windows), поэтому
+// каждый прогон контракта запускается отдельным процессом.
+const ZONES = ['Europe/Moscow', 'UTC', 'Asia/Vladivostok', 'America/New_York'];
+let spawnBlocked = false;
+for (const zone of ZONES) {
+  const result = spawnSync(process.execPath, [join(here, 'period-contract.mjs'), zone], {
+    env: { ...process.env, TZ: zone },
+    encoding: 'utf8',
+  });
+  if (result.error && (result.error.code === 'EPERM' || result.error.code === 'ENOENT')) {
+    // Некоторые песочницы запрещают дочерние процессы. Тогда матрицу зон гоняем
+    // снаружи: TZ=UTC node tests/run-tests.mjs.
+    spawnBlocked = true;
+    break;
+  }
+  if (result.status !== 0) {
+    process.stderr.write(
+      `period-contract.mjs упал в зоне ${zone} (status ${result.status}):\n` +
+        `${result.stderr || ''}${result.stdout || ''}\n`,
+    );
+    process.exit(1);
+  }
+}
+if (spawnBlocked) {
+  process.stderr.write(
+    'WARN: матрица часовых зон пропущена — среда не разрешает дочерние процессы. ' +
+      'Проверьте вручную: TZ=UTC node tests/run-tests.mjs и TZ=Asia/Vladivostok node tests/run-tests.mjs.\n',
+  );
+}
 
 console.log(
   JSON.stringify(
