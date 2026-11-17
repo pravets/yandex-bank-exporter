@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Яндекс Пэй → Excel</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span class="mark"></span>Яндекс Пэй → Excel</div>
+      <div class="sub">История операций в таблице</div>
+    </header>
+
+    <section class="status" id="status" data-kind="info">Проверяю вкладку…</section>
+
+    <section class="controls" id="controls" hidden>
+      <label class="field">
+        <span>Период</span>
+        <select id="period">
+          <option value="current" id="optCurrent">Текущий год</option>
+          <option value="prev" id="optPrev">Прошлый год</option>
+          <option value="all">Всё время</option>
+          <option value="custom">Свой период…</option>
+        </select>
+      </label>
+
+      <div class="dates" id="dates" hidden>
+        <label class="field">
+          <span>С</span>
+          <input type="date" id="dateFrom" />
+        </label>
+        <label class="field">
+          <span>По</span>
+          <input type="date" id="dateTo" />
+        </label>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="withTransfers" />
+        <span>Включать переводы между счетами</span>
+      </label>
+
+      <label class="check" title="По умолчанию скрыты: эти траты уже учтены в выписках других банков">
+        <input type="checkbox" id="withForeignCards" />
+        <span>Включать операции с карт других банков</span>
+      </label>
+    </section>
+
+    <div class="actions">
+      <button id="run" class="primary" hidden>Скачать Excel</button>
+      <button id="prepare" class="primary" hidden>Подготовить страницу</button>
+      <button id="retry" class="ghost" hidden>Повторить</button>
+    </div>
+
+    <div class="progress" id="progress" hidden>
+      <div class="bar"><i id="bar"></i></div>
+      <div class="pinfo" id="pinfo"></div>
+    </div>
+
+    <footer>
+      <div>Данные не покидают браузер: запросы идут только на bank.yandex.ru</div>
+      <button id="diag" class="link" hidden>Сохранить образец ответа для диагностики</button>
+    </footer>
+
+    <script src="lib/xlsx-lite.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,259 @@
+:root {
+  --ink: #1f2430;
+  --muted: #6b7280;
+  --line: #e3e7ee;
+  --brand: #fc3f1d;
+  --brand-dark: #d92f10;
+  --bg: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 348px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+body {
+  padding: 14px 16px 10px;
+}
+
+header {
+  margin-bottom: 12px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.mark {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--brand);
+  margin-right: 8px;
+  position: relative;
+}
+
+.mark::after {
+  content: "";
+  position: absolute;
+  inset: 3px 3px auto 3px;
+  height: 0;
+  border-top: 2px solid #fff;
+  box-shadow: 0 4px 0 #fff, 0 8px 0 #fff;
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+  margin-left: 22px;
+}
+
+.status {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 12.5px;
+  background: #f8fafc;
+  color: var(--ink);
+  margin-bottom: 12px;
+}
+
+.status[data-kind="ok"] {
+  background: #f1f8f2;
+  border-color: #cfe8d5;
+  color: #1c6b32;
+}
+
+.status[data-kind="warn"] {
+  background: #fff8ec;
+  border-color: #f3e2c2;
+  color: #8a5a12;
+}
+
+.status[data-kind="error"] {
+  background: #fdf2f2;
+  border-color: #f3d3d3;
+  color: #a1281f;
+}
+
+.controls {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+select,
+input[type="date"] {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+select:focus,
+input[type="date"]:focus {
+  outline: 2px solid rgba(252, 63, 29, 0.25);
+  border-color: var(--brand);
+}
+
+.dates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.check input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--brand);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+button {
+  flex: 1;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+
+button.primary {
+  background: var(--brand);
+  color: #fff;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--brand-dark);
+}
+
+button.ghost {
+  background: #fff;
+  border-color: var(--line);
+  color: var(--ink);
+  flex: 0 0 auto;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: #f5f7fa;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button.link {
+  flex: 0 0 auto;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: left;
+  text-decoration: underline;
+}
+
+button.link:hover:not(:disabled) {
+  background: none;
+  color: var(--ink);
+}
+
+.progress {
+  margin: 2px 0 10px;
+}
+
+.bar {
+  height: 5px;
+  border-radius: 3px;
+  background: #eef1f5;
+  overflow: hidden;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--brand);
+  transition: width 0.2s ease;
+}
+
+.bar > i.indeterminate {
+  width: 35%;
+  animation: slide 1.1s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% {
+    margin-left: -35%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+.pinfo {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+footer {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+[hidden] {
+  display: none !important;
+}

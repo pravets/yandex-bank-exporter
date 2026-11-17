@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Яндекс Пэй — экспорт истории в Excel",
+  "version": "1.3.0",
+  "description": "Выгружает операции из истории Яндекс Пэя в Excel (.xlsx): суммы, категории, кешбэк и баллы за выбранный период.",
+  "minimum_chrome_version": "111",
+  "permissions": ["scripting", "activeTab", "downloads"],
+  "host_permissions": ["https://bank.yandex.ru/*"],
+  "action": {
+    "default_title": "Экспорт истории Яндекс Пэя в Excel",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://bank.yandex.ru/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}

@@ -1,0 +1,272 @@
+// Проверка кода расширения без Chrome: грузим xlsx-lite.js и popup.js в этот процесс,
+// собираем отчёт из синтетических "сырых" операций GraphQL и пишем .xlsx.
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const ext = join(here, '..', 'src');
+// Образец отчёта пишем в temp: тест не должен зависеть от прав на рабочую папку
+// и не должен засорять репозиторий. Путь можно переопределить через TEST_OUT_FILE.
+const outFile = process.env.TEST_OUT_FILE || join(tmpdir(), 'yandex-pay-sample-report.xlsx');
+
+// popup.js в конце вызывает init() — в тесте это не нужно и тянет за собой DOM/chrome.
+const popupSource = readFileSync(join(ext, 'popup.js'), 'utf8');
+const cut = popupSource.indexOf("document.addEventListener('DOMContentLoaded', init);");
+if (cut === -1) throw new Error('не нашёл точку входа popup.js');
+const popupForTest = popupSource.slice(0, cut);
+
+globalThis.document = { addEventListener() {}, readyState: 'loading', getElementById: () => null };
+
+vm.runInThisContext(readFileSync(join(ext, 'lib', 'xlsx-lite.js'), 'utf8'), {
+  filename: 'xlsx-lite.js',
+});
+vm.runInThisContext(popupForTest, { filename: 'popup.js' });
+
+if (typeof globalThis.mapItem !== 'function') throw new Error('mapItem не загрузился');
+if (typeof globalThis.buildSheets !== 'function') throw new Error('buildSheets не загрузился');
+if (typeof globalThis.buildDiagnostics !== 'function') throw new Error('buildDiagnostics не загрузился');
+if (!globalThis.XlsxLite) throw new Error('XlsxLite не загрузился');
+
+// ---------- синтетическая лента, повторяющая форму ответа GraphQL ----------
+const OP_CHAIN = (opId) =>
+  'FEED_VIEW::LINKED_TRUST_PURCHASE_TOKEN::::::NTQ3OTYyOTgzMjkzMDczOTI=::::false::::V4::' +
+  btoa(JSON.stringify([{ type: 'DEPOSIT', operationId: opId, operationTimestamp: '2026-01-01T00:00:00Z' }])) +
+  '::true';
+
+const CATEGORIES = ['Супермаркеты', 'Яндекс', 'Фастфуд', 'Аптеки', 'Рестораны и кафе'];
+
+function rawItem(index) {
+  const day = 1 + Math.floor(index * 5.6);
+  const month = 1 + Math.floor(day / 31);
+  const date = `2026-${String(Math.min(month, 12)).padStart(2, '0')}-${String((day % 28) + 1).padStart(2, '0')}T${String(9 + (index % 12)).padStart(2, '0')}:${String((index * 7) % 60).padStart(2, '0')}:00.000Z`;
+
+  const statusCode = index % 17 === 0 ? 'FAIL' : index % 23 === 0 ? 'HOLD' : 'CLEAR';
+  const base = {
+    id: OP_CHAIN('op_' + index),
+    date,
+    statusCode,
+    comment: null,
+    rightSubTitle: 'Карта Пэй',
+    summaryCashback: null,
+    __typename: 'OperationV2',
+  };
+
+  switch (index % 7) {
+    case 0:
+      return {
+        ...base,
+        direction: 'DEBIT',
+        title: { plain: 'Перевод на накопительный' },
+        description: 'Перевод между счетами',
+        amount: { money: { amount: '40000.00', currency: 'RUB' }, plus: null },
+        rightSubTitle: null,
+      };
+    case 1:
+      return {
+        ...base,
+        direction: 'CREDIT',
+        title: { plain: 'Выплата процентов' },
+        description: 'Пополнение',
+        amount: { money: { amount: '0.03', currency: 'RUB' }, plus: null },
+        rightSubTitle: null,
+      };
+    case 2:
+      return {
+        ...base,
+        direction: 'DEBIT',
+        title: { plain: 'Такси' },
+        description: 'Списание баллов',
+        amount: { money: null, plus: '500.00' },
+        rightSubTitle: null,
+      };
+    case 3:
+      return {
+        ...base,
+        direction: 'DEBIT',
+        title: { plain: 'Иосиф П.' },
+        description: 'Перевод',
+        amount: { money: { amount: '5000.00', currency: 'RUB' }, plus: null },
+        rightSubTitle: null,
+      };
+    default: {
+      const category = CATEGORIES[index % CATEGORIES.length];
+      return {
+        ...base,
+        direction: 'DEBIT',
+        title: { plain: 'Магазин ' + index },
+        description: category,
+        amount: { money: { amount: String(100 + index * 13.37).slice(0, 7), currency: 'RUB' }, plus: null },
+        summaryCashback: { totalValue: { plus: String((index % 9) * 7) + '.00' } },
+      };
+    }
+  }
+}
+
+const items = Array.from({ length: 60 }, (_, index) => rawItem(index));
+const rows = items.map(globalThis.mapItem).map((row, index) => ({
+  ...row,
+  account:
+    index % 10 === 0
+      ? globalThis.pickAccount(row, null)
+      : globalThis.pickAccount(row, new Set([index % 5 === 0 ? 'Счёт' : 'Карта Пэй'])),
+}));
+
+// ---------- продукты и подпись карты/счёта ----------
+assert.equal(globalThis.filterLabel({ name: 'Карта Пэй', secondName: null }), 'Карта Пэй');
+assert.equal(globalThis.filterLabel({ name: 'Счёт', secondName: '90,92 ₽' }), 'Счёт');
+assert.equal(globalThis.filterLabel({ name: 'Карта', secondName: '•• 0980' }), 'Карта •• 0980');
+
+const filters = globalThis.availableFilters({
+  filters: {
+    filters: [
+      { filterType: 'ALL', id: 'ALL', name: 'Все' },
+      { filterType: 'PAY_CARD', id: 'PAY_CARD-pa_X', name: 'Карта Пэй', agreementId: 'pa_X' },
+      {
+        filterType: 'SAVING_ACCOUNT',
+        id: 'SAVING_ACCOUNT-sa_X',
+        name: 'Счёт',
+        secondName: '90,92 ₽',
+        agreementId: 'sa_X',
+      },
+    ],
+    savingFilters: [],
+    customFilters: [{ filterType: 'YANDEX_SERVICES', id: 'YANDEX_SERVICES', name: 'Сервисы Яндекса' }],
+  },
+});
+assert.deepEqual(
+  filters.map((filter) => filter.label),
+  ['Карта Пэй', 'Счёт'],
+);
+assert.equal(filters[0].agreementId, 'pa_X');
+
+assert.equal(globalThis.pickAccount({ paymentCard: 'Карта · 0980' }, new Set(['Карта Пэй'])), 'Карта Пэй');
+assert.equal(globalThis.pickAccount({ paymentCard: 'Карта · 0980' }, null), 'Не определено');
+assert.equal(globalThis.pickAccount({}, new Set(['Счёт', 'Карта Пэй'])), 'Счёт / Карта Пэй');
+assert.equal(globalThis.pickAccount({}, null), 'Не определено');
+
+assert.equal(globalThis.isForeignPayment({ paymentCard: 'Карта · 0980' }), true);
+assert.equal(globalThis.isForeignPayment({ paymentCard: 'Карта · 2328' }), true);
+assert.equal(globalThis.isForeignPayment({ paymentCard: '' }), false);
+assert.equal(globalThis.isForeignPayment({ paymentCard: 'Счёт · 1234' }), false);
+
+const sampleRow = globalThis.mapItem({
+  id: 'raw-id',
+  date: '2026-01-01T00:00:00Z',
+  direction: 'DEBIT',
+  title: { plain: 'Магазин' },
+  description: 'Супермаркеты',
+  rightSubTitle: 'Карта · 0980',
+  amount: { money: { amount: '1.00', currency: 'RUB' } },
+});
+assert.equal(sampleRow.rawId, 'raw-id');
+assert.equal(sampleRow.paymentCard, 'Карта · 0980');
+assert.equal(sampleRow.account, '');
+assert.ok(sampleRow.contentKey.includes('2026-01-01T00:00:00Z'));
+assert.ok(rows.every((row) => typeof row.account === 'string' && row.account.length > 0));
+assert.ok(rows.some((row) => row.account === 'Не определено'));
+assert.ok(rows.some((row) => row.account === 'Карта Пэй'));
+
+const sheets = globalThis.buildSheets(rows, {
+  periodLabel: '2026',
+  subtitle: `Период: тест · операций: ${rows.length}`,
+  skipped: '',
+});
+
+const bytes = globalThis.XlsxLite.build(sheets);
+writeFileSync(outFile, bytes);
+
+const sum = (list, fn) => list.reduce((acc, item) => acc + fn(item), 0);
+const ok = rows.filter((row) => row.statusCode === 'CLEAR' || row.statusCode === 'HOLD');
+const expected = {
+  rows: rows.length,
+  expenses: Number(sum(ok.filter((r) => r.kind === 'Расход'), (r) => r.amount).toFixed(2)),
+  transfersOut: Number(
+    sum(ok.filter((r) => (r.kind === 'Перевод' || r.kind === 'Перевод между счетами') && r.direction !== 'CREDIT'), (r) => r.amount).toFixed(2),
+  ),
+  income: Number(sum(ok.filter((r) => r.kind === 'Доход'), (r) => r.amount).toFixed(2)),
+  cashback: Number(sum(ok, (r) => r.cashback || 0).toFixed(2)),
+};
+
+// ---------- диагностический образец ответа ----------
+const requestBody = JSON.stringify({
+  operationName: 'GetTransactionFeedView',
+  variables: { size: 50, agreementId: 'pa_TEST', filterType: 'PAY_CARD' },
+  extensions: { persistedQuery: { version: 1, sha256Hash: 'hash' } },
+});
+
+const diagnostics = globalThis.buildDiagnostics(
+  {
+    body: requestBody,
+    agreementId: 'pa_TEST',
+    filterType: 'PAY_CARD',
+    responseAt: Date.parse('2026-11-17T10:00:00Z'),
+    operations: [
+      {
+        operationName: 'GetTransactionFeedView',
+        hash: 'hash',
+        variables: { size: 50 },
+        at: Date.parse('2026-11-17T10:00:00Z'),
+        responseKeys: null,
+        response: null,
+      },
+    ],
+    responseSample: {
+      items: [
+        {
+          id: 'x',
+          rightSubTitle: 'Карта · 0980',
+          account: { title: 'Счёт', maskedNumber: '1234' },
+        },
+      ],
+      paths: ['account', 'account.maskedNumber', 'id', 'rightSubTitle'],
+      feedKeys: ['items', 'cursor'],
+      itemCount: 1,
+      request: { agreementId: 'pa_TEST', filterType: 'PAY_CARD' },
+    },
+  },
+  'https://bank.yandex.ru/my/history?filterId=PAY_CARD-1-pa_TEST',
+  '1.1.0',
+  Date.parse('2026-11-17T10:05:00Z'),
+);
+
+assert.equal(diagnostics.generatedAt, '2026-11-17T10:05:00.000Z');
+assert.equal(diagnostics.extensionVersion, '1.1.0');
+assert.equal(diagnostics.request.filterIdFromUrl, 'PAY_CARD-1-pa_TEST');
+assert.equal(diagnostics.request.agreementId, 'pa_TEST');
+assert.equal(diagnostics.request.filterType, 'PAY_CARD');
+assert.equal(diagnostics.request.variables.size, 50);
+assert.equal(diagnostics.feed.itemCount, 1);
+assert.deepEqual(diagnostics.feed.keys, ['items', 'cursor']);
+assert.equal(diagnostics.items.length, 1);
+assert.equal(diagnostics.operations.length, 1);
+assert.equal(diagnostics.operations[0].operationName, 'GetTransactionFeedView');
+assert.equal(diagnostics.feedFilters, null);
+assert.ok(diagnostics.paths.includes('account.maskedNumber'));
+
+const noSample = globalThis.buildDiagnostics({ body: requestBody }, 'https://bank.yandex.ru/', '', 0);
+assert.deepEqual(noSample.items, []);
+assert.deepEqual(noSample.operations, []);
+assert.equal(noSample.feed.itemCount, 0);
+assert.equal(noSample.request.agreementId, 'pa_TEST');
+assert.equal(noSample.request.filterType, 'PAY_CARD');
+assert.equal(noSample.request.filterIdFromUrl, '');
+assert.equal(noSample.generatedAt, '1970-01-01T00:00:00.000Z');
+assert.deepEqual(noSample.paths, []);
+
+console.log(
+  JSON.stringify(
+    {
+      file: outFile,
+      bytes: bytes.length,
+      sheets: sheets.map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
+      expected,
+      firstRow: sheets[0].rows[1],
+    },
+    null,
+    2,
+  ),
+);
