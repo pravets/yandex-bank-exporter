@@ -16,31 +16,38 @@ print("second:", [c.value for c in ws[3]])
 
 # типы ячеек: дата должна читаться как datetime, деньги — как число
 date_cell = ws.cell(row=2, column=2)
-money_cell = ws.cell(row=2, column=8)
+money_cell = ws.cell(row=2, column=9)
 print("date cell:", repr(date_cell.value), date_cell.number_format)
 print("money cell:", repr(money_cell.value), money_cell.number_format)
 assert hasattr(date_cell.value, "year"), "дата не распознана как дата"
 assert isinstance(money_cell.value, (int, float)), "сумма не число"
 
 # колонка «Карта / счёт» заполнена в каждой строке
-accounts = [row[10] for row in ws.iter_rows(min_row=2, values_only=True)]
+accounts = [row[11] for row in ws.iter_rows(min_row=2, values_only=True)]
 assert all(isinstance(value, str) and value.strip() for value in accounts), "пустая карта/счёт"
 print("account values:", sorted(set(accounts)))
 
 # пересчитываем итоги из листа «Операции» (в итоги идут только «Проведено»/«Холд»)
 OK_STATUSES = {"Проведено", "Холд"}
-totals = {"Расход": 0.0, "Перевод": 0.0, "Перевод между счетами": 0.0, "Доход": 0.0}
+totals = {"Расход": 0.0, "trOut": 0.0, "trIn": 0.0, "Доход": 0.0}
 cashback = 0.0
 for row in ws.iter_rows(min_row=2, values_only=True):
     kind = row[6]
-    amount = row[7]
-    status = row[11]
+    direction = row[7]
+    amount = row[8]
+    status = row[12]
     if status not in OK_STATUSES:
         continue
-    if kind in totals and isinstance(amount, (int, float)):
-        totals[kind] += amount
-    if isinstance(row[9], (int, float)):
-        cashback += row[9]
+    if isinstance(amount, (int, float)):
+        if kind == "Расход":
+            totals["Расход"] += amount
+        elif kind == "Доход":
+            totals["Доход"] += amount
+        elif kind in ("Перевод", "Перевод между счетами"):
+            # Направление берём из отдельной колонки, а не угадываем по типу.
+            totals["trIn" if direction == "Поступление" else "trOut"] += amount
+    if isinstance(row[10], (int, float)):
+        cashback += row[10]
 
 print("recomputed:", {k: round(v, 2) for k, v in totals.items()}, "cashback:", round(cashback, 2))
 
@@ -55,7 +62,8 @@ print("summary KPI:", summary)
 
 checks = [
     ("Расходы (покупки и услуги), ₽", round(totals["Расход"], 2)),
-    ("Переводы исходящие, ₽", round(totals["Перевод"] + totals["Перевод между счетами"], 2)),
+    ("Переводы исходящие, ₽", round(totals["trOut"], 2)),
+    ("Переводы входящие, ₽", round(totals["trIn"], 2)),
     ("Поступления (доходы), ₽", round(totals["Доход"], 2)),
     ("Кешбэк начислено, баллы", round(cashback, 2)),
 ]

@@ -251,6 +251,7 @@ assert.deepEqual(noSample.paths, []);
 // TZ нельзя надёжно поменять внутри процесса (особенно на Windows), поэтому
 // каждый прогон контракта запускается отдельным процессом.
 const ZONES = ['Europe/Moscow', 'UTC', 'Asia/Vladivostok', 'America/New_York'];
+const skipped = [];
 let spawnBlocked = false;
 for (const zone of ZONES) {
   const result = spawnSync(process.execPath, [join(here, 'period-contract.mjs'), zone], {
@@ -272,10 +273,32 @@ for (const zone of ZONES) {
   }
 }
 if (spawnBlocked) {
+  skipped.push('period-contract.mjs (матрица зон)');
   process.stderr.write(
     'WARN: матрица часовых зон пропущена — среда не разрешает дочерние процессы. ' +
       'Проверьте вручную: TZ=UTC node tests/run-tests.mjs и TZ=Asia/Vladivostok node tests/run-tests.mjs.\n',
   );
+}
+
+// ---------- остальные наборы проверок ----------
+// Каждый файл — самостоятельный процесс со своими моками globalThis.
+const SUITES = ['pagination.mjs', 'transfers.mjs', 'money.mjs', 'dedupe.mjs'];
+for (const suite of SUITES) {
+  const result = spawnSync(process.execPath, [join(here, suite)], { encoding: 'utf8' });
+  if (result.error && (result.error.code === 'EPERM' || result.error.code === 'ENOENT')) {
+    skipped.push(suite);
+    process.stderr.write(`WARN: ${suite} пропущен — среда не разрешает дочерние процессы.\n`);
+    continue;
+  }
+  if (result.status !== 0) {
+    process.stderr.write(
+      `${suite} упал (status ${result.status}):\n${result.stderr || ''}${result.stdout || ''}\n`,
+    );
+    process.exit(1);
+  }
+}
+if (skipped.length) {
+  process.stderr.write(`WARN: не выполнено проверок: ${skipped.length} (${skipped.join(', ')}).\n`);
 }
 
 console.log(
@@ -286,6 +309,7 @@ console.log(
       sheets: sheets.map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
       expected,
       firstRow: sheets[0].rows[1],
+      skipped,
     },
     null,
     2,

@@ -10,7 +10,10 @@ const STATUS_RU = {
   CANCEL: 'Отменено',
 };
 const OK_STATUSES = new Set(['CLEAR', 'HOLD']);
-const TRANSFER_CATEGORIES = new Set(['Перевод между счетами', 'Перевод']);
+// Категория банка, которая означает перевод между своими счетами.
+const INTERNAL_TRANSFER_CATEGORY = 'Перевод между счетами';
+// Переводы для агрегации в сводке: и внутренние, и обычные.
+const TRANSFER_CATEGORIES = new Set([INTERNAL_TRANSFER_CATEGORY, 'Перевод']);
 const MONTH_RU = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 const PAGE_SIZE = 50;
 const MAX_PAGES = 400;
@@ -355,25 +358,59 @@ function mapItem(item) {
     /* id необязателен */
   }
 
-  const amount =
-    item.amount && item.amount.money ? Number(item.amount.money.amount) : null;
-  const points = item.amount && item.amount.plus ? Number(item.amount.plus) : null;
-  const cashback =
+  const money = item.amount && item.amount.money ? item.amount.money : null;
+  const pointsRaw = item.amount && item.amount.plus != null ? Number(item.amount.plus) : null;
+  const cashbackRaw =
     item.summaryCashback && item.summaryCashback.totalValue && item.summaryCashback.totalValue.plus
       ? Number(item.summaryCashback.totalValue.plus)
       : null;
 
   const category = (item.description || '').trim();
-  let kind;
-  if (amount === null) kind = 'Баллы';
-  else if (TRANSFER_CATEGORIES.has(category)) kind = category;
-  else kind = item.direction === 'DEBIT' ? 'Расход' : 'Доход';
-
-  const date = mskParts(item.date);
-  const time = Date.parse(item.date);
   const direction = item.direction || '';
+  let dataError = '';
+  let amount = null;
+  let points = pointsRaw;
+  let cashback = cashbackRaw;
+  let currency = '';
+
+  if (money) {
+    currency = money.currency || '';
+    const parsed = Number(money.amount);
+    if (!Number.isFinite(parsed)) dataError = 'некорректная сумма';
+    else amount = parsed;
+    if (!dataError && currency && currency !== 'RUB') dataError = `валюта ${currency}`;
+  }
+  if (points !== null && !Number.isFinite(points)) {
+    dataError = dataError || 'некорректные баллы';
+    points = null;
+  }
+  if (cashback !== null && !Number.isFinite(cashback)) {
+    dataError = dataError || 'некорректный кешбэк';
+    cashback = null;
+  }
+
+  const time = Date.parse(item.date);
+  if (!Number.isFinite(time)) dataError = dataError || 'некорректная дата';
+  // Без корректной даты нечего класть в календарные поля: зануляем и помечаем строку.
+  const date = Number.isFinite(time)
+    ? mskParts(item.date)
+    : { year: 0, month: 0, day: 0, hour: 0, minute: 0 };
+
+  let kind;
+  if (money) {
+    kind = TRANSFER_CATEGORIES.has(category)
+      ? category
+      : direction === 'DEBIT'
+        ? 'Расход'
+        : 'Доход';
+  } else {
+    kind = 'Баллы';
+  }
+
   const title = ((item.title && item.title.plain) || '').trim();
   const rawId = item.id || '';
+  // Отпечаток включает категорию и статус: записи без ID, различающиеся ими, не склеиваются.
+  const fingerprint = `${item.date}|${amount}|${direction}|${title}|${category}|${item.statusCode || ''}`;
 
   return {
     time,
@@ -382,11 +419,14 @@ function mapItem(item) {
     day: date.day,
     hour: date.hour,
     minute: date.minute,
-    monthKey: `${date.year}-${String(date.month).padStart(2, '0')}`,
+    monthKey: Number.isFinite(time)
+      ? `${date.year}-${String(date.month).padStart(2, '0')}`
+      : '',
     title,
     category,
     kind,
     direction,
+    currency,
     amount,
     points: points === null ? null : direction === 'DEBIT' ? -points : points,
     cashback,
@@ -396,11 +436,34 @@ function mapItem(item) {
     account: '',
     status: STATUS_RU[item.statusCode] || item.statusCode || '',
     statusCode: item.statusCode || '',
+    // Пустая строка — запись пригодна для расчётов; иначе причина и исключение из итогов.
+    dataError,
     opId,
     rawId,
-    contentKey: `${item.date}|${amount}|${direction}|${title}`,
-    matchKey: rawId || `${item.date}|${amount}|${direction}|${title}`,
+    contentKey: fingerprint,
+    matchKey: rawId || fingerprint,
   };
+}
+
+/** Перевод между своими счетами (а не обычный перевод контрагенту). */
+function isInternalTransfer(row) {
+  return !!row && row.kind === INTERNAL_TRANSFER_CATEGORY;
+}
+
+/**
+ * Галочка «Включать переводы между счетами» управляет только внутренними
+ * переводами: обычные переводы контрагентам и дальше попадают в выгрузку.
+ */
+function shouldIncludeRow(row, includeTransfers) {
+  return includeTransfers || !isInternalTransfer(row);
+}
+
+/** Человеческое направление операции для колонки отчёта. */
+function directionLabel(row) {
+  if (!row) return '';
+  if (row.direction === 'DEBIT') return 'Списание';
+  if (row.direction === 'CREDIT') return 'Поступление';
+  return '';
 }
 
 /**
@@ -517,28 +580,43 @@ function isForeignPayment(row) {
 }
 
 /**
- * Листает ленту до начала периода. Для продуктового фильтра сначала проверяет,
- * какую форму фильтра принимает банк (filterType+agreementId, затем по отдельности).
+ * Листает ленту до начала периода.
+ *
+ * Возвращает не только строки, но и полноту результата: `complete === false`
+ * означает, что лента оборвалась на лимите страниц или курсор перестал двигаться,
+ * и вызывающий обязан показать это пользователю, а не выдавать выгрузку за полную.
+ *
+ * Для продуктового фильтра сначала проверяет, какую форму фильтра принимает банк.
+ * Проба альтернативной формы делается только при ошибке/отсутствии ответа:
+ * легитимно пустая история продукта не расширяется до чужих операций.
  */
 async function collectPages(tabId, template, period, filter, onPage) {
   const rows = [];
   const seen = new Set();
+  const seenCursors = new Set();
+  let duplicates = 0;
   let cursor = null;
   let pages = 0;
+  let probes = 0;
+  let stopReason = 'limit';
+  let approx = false;
   let active = filter || null;
 
   for (let page = 1; page <= MAX_PAGES; page += 1) {
     let result = await fetchPage(tabId, template, cursor, active);
 
-    if (page === 1 && filter && (!result || result.error || !(result.items || []).length)) {
+    if (page === 1 && filter && (!result || result.error)) {
       const alternatives = [];
       if (filter.filterType) alternatives.push({ filterType: filter.filterType, agreementId: null });
       if (filter.agreementId) alternatives.push({ filterType: null, agreementId: filter.agreementId });
       for (const alternative of alternatives) {
+        probes += 1;
         const probe = await fetchPage(tabId, template, null, alternative);
         if (probe && !probe.error && (probe.items || []).length) {
           active = alternative;
           result = probe;
+          // Сработала широкая форма фильтра: продукт определён приблизительно.
+          approx = true;
           break;
         }
       }
@@ -548,26 +626,61 @@ async function collectPages(tabId, template, period, filter, onPage) {
     if (result.error) throw new Error(result.error);
 
     const items = result.items || [];
-    if (!items.length) break;
+    if (!items.length) {
+      stopReason = 'empty';
+      break;
+    }
 
+    let added = 0;
     for (const item of items) {
       const row = mapItem(item);
-      if (seen.has(row.matchKey)) continue;
+      if (seen.has(row.matchKey)) {
+        duplicates += 1;
+        continue;
+      }
       seen.add(row.matchKey);
       rows.push(row);
+      added += 1;
     }
 
     pages = page;
     if (onPage) onPage({ page, rows, pages });
 
     const oldest = items[items.length - 1].date;
-    if (period.from && Date.parse(oldest) < period.from.getTime()) break;
-    if (!result.cursor) break;
+    if (period.from && Date.parse(oldest) < period.from.getTime()) {
+      stopReason = 'period';
+      break;
+    }
+    if (!result.cursor) {
+      stopReason = 'end';
+      break;
+    }
+    // Тот же курсор или страница без единой новой строки: дальше не продвигаемся.
+    if (seenCursors.has(result.cursor) || added === 0) {
+      stopReason = 'no-progress';
+      break;
+    }
+    seenCursors.add(result.cursor);
     cursor = result.cursor;
     if (filter) await new Promise((resolve) => setTimeout(resolve, 60));
   }
 
-  return { rows, pages };
+  return {
+    rows,
+    pages,
+    requests: pages + probes,
+    duplicates,
+    stopReason,
+    complete: stopReason === 'end' || stopReason === 'period' || stopReason === 'empty',
+    approx,
+  };
+}
+
+/** Человеческая причина неполной выгрузки. */
+function stopReasonText(reason) {
+  if (reason === 'limit') return 'достигнут лимит страниц';
+  if (reason === 'no-progress') return 'курсор не продвигается';
+  return 'лента не дочитана';
 }
 
 // ------------------------------------------------------------------ Excel
@@ -583,6 +696,7 @@ function buildSheets(rows, meta) {
     'Описание',
     'Категория',
     'Тип',
+    'Направление',
     'Сумма, ₽',
     'Баллы',
     'Кешбэк, баллы',
@@ -606,11 +720,15 @@ function buildSheets(rows, meta) {
       { v: row.title, s: style(S.TEXT, S.ZEBRA_TEXT) },
       { v: row.category, s: style(S.TEXT, S.ZEBRA_TEXT) },
       { v: row.kind, s: style(S.TEXT, S.ZEBRA_TEXT) },
+      { v: directionLabel(row), s: style(S.TEXT, S.ZEBRA_TEXT) },
       row.amount === null ? null : { v: row.amount, s: style(S.MONEY, S.ZEBRA_MONEY) },
       row.points === null ? null : { v: row.points, s: style(S.MONEY, S.ZEBRA_MONEY) },
       row.cashback === null ? null : { v: row.cashback, s: style(S.MONEY, S.ZEBRA_MONEY) },
       { v: row.account, s: style(S.TEXT, S.ZEBRA_TEXT) },
-      { v: row.status, s: style(S.TEXT, S.ZEBRA_TEXT) },
+      {
+        v: row.dataError ? `Некорректные данные: ${row.dataError}` : row.status,
+        s: style(S.TEXT, S.ZEBRA_TEXT),
+      },
       { v: row.opId, s: style(S.TEXT, S.ZEBRA_TEXT) },
     ]);
   });
@@ -618,15 +736,18 @@ function buildSheets(rows, meta) {
   const operations = {
     name: 'Операции',
     rows: ops,
-    widths: [6, 12, 9, 10, 34, 24, 21, 14, 11, 15, 22, 12, 28],
+    widths: [6, 12, 9, 10, 34, 24, 21, 13, 14, 11, 15, 22, 12, 28],
     rowHeights: [30],
     freeze: { rows: 1, cols: 0 },
-    autoFilter: `A1:M${ops.length}`,
+    autoFilter: `A1:N${ops.length}`,
   };
 
   // ---------- сводка ----------
-  const ok = rows.filter((row) => OK_STATUSES.has(row.statusCode));
-  const months = [...new Set(rows.map((row) => row.monthKey))].sort();
+  // В итоги идут только проведённые операции с пригодными данными и датой.
+  const ok = rows.filter(
+    (row) => OK_STATUSES.has(row.statusCode) && !row.dataError && Number.isFinite(row.time),
+  );
+  const months = [...new Set(ok.map((row) => row.monthKey))].sort();
 
   const perMonth = new Map();
   for (const month of months) {
@@ -1068,7 +1189,13 @@ async function run() {
     };
 
     const filterFailures = [];
+    const incomplete = [];
+    const approxKeys = new Set();
     let pages = base.pages;
+    let requests = base.requests;
+    let duplicates = base.duplicates;
+    if (!base.complete) incomplete.push(`общая лента (${stopReasonText(base.stopReason)})`);
+
     for (let index = 0; index < products.length; index += 1) {
       const product = products[index];
       progress(
@@ -1078,14 +1205,27 @@ async function run() {
       try {
         const part = await collectPages(state.tabId, capture.body, period, product);
         pages += part.pages;
-        for (const row of part.rows) addLabel(row, product.label);
+        requests += part.requests;
+        duplicates += part.duplicates;
+        if (!part.complete) {
+          incomplete.push(`${product.label} (${stopReasonText(part.stopReason)})`);
+        }
+        for (const row of part.rows) {
+          addLabel(row, product.label);
+          if (part.approx) {
+            if (row.rawId) approxKeys.add(row.rawId);
+            approxKeys.add(row.contentKey);
+          }
+        }
       } catch (error) {
         filterFailures.push(`${product.label}: ${error.message || error}`);
       }
     }
 
+    // Галочка «переводы между счетами» выключает только внутренние переводы,
+    // обычные переводы контрагентам остаются в выгрузке.
     const inScope = base.rows.filter(
-      (row) => inPeriod(row, period) && (includeTransfers || !TRANSFER_CATEGORIES.has(row.kind)),
+      (row) => inPeriod(row, period) && shouldIncludeRow(row, includeTransfers),
     );
     const foreignTotal = inScope.filter(isForeignPayment).length;
     const foreignCount = includeForeignCards ? 0 : foreignTotal;
@@ -1093,7 +1233,8 @@ async function run() {
       .filter((row) => includeForeignCards || !isForeignPayment(row))
       .map((row) => {
         const labels = labelsByKey.get(row.rawId) || labelsByKey.get(row.contentKey);
-        return { ...row, account: pickAccount(row, labels) };
+        const approx = approxKeys.has(row.rawId) || approxKeys.has(row.contentKey);
+        return { ...row, account: pickAccount(row, labels), accountApprox: approx };
       });
 
     if (!rows.length) {
@@ -1107,14 +1248,28 @@ async function run() {
 
     const unknown = rows.filter((row) => row.account === 'Не определено').length;
     const failed = rows.filter((row) => !OK_STATUSES.has(row.statusCode)).length;
-    const first = rows[rows.length - 1];
-    const last = rows[0];
+    const invalid = rows.filter((row) => !!row.dataError).length;
+    const approximate = rows.filter(
+      (row) => row.accountApprox && row.account !== 'Не определено',
+    ).length;
+    const missingId = rows.filter((row) => !row.rawId).length;
+    // Диапазон строим по строкам с корректной датой: битые даты не должны давать «00.00.0».
+    const dated = rows.filter((row) => Number.isFinite(row.time) && row.monthKey);
+    const first = dated.length ? dated[dated.length - 1] : null;
+    const last = dated.length ? dated[0] : null;
+    const rangeText =
+      first && last
+        ? `Период: ${String(first.day).padStart(2, '0')}.${String(first.monthNumber).padStart(2, '0')}.${first.year} — ` +
+          `${String(last.day).padStart(2, '0')}.${String(last.monthNumber).padStart(2, '0')}.${last.year} · `
+        : '';
     const subtitle =
-      `Период: ${String(first.day).padStart(2, '0')}.${String(first.monthNumber).padStart(2, '0')}.${first.year} — ` +
-      `${String(last.day).padStart(2, '0')}.${String(last.monthNumber).padStart(2, '0')}.${last.year} · ` +
-      `операций: ${rows.length} · страниц: ${pages}` +
+      rangeText +
+      `операций: ${rows.length} · страниц: ${pages} · запросов: ${requests}` +
       (failed ? ` · не проведено: ${failed}` : '') +
+      (invalid ? ` · ошибка данных: ${invalid}` : '') +
       (unknown ? ` · карта/счёт не определены: ${unknown}` : '') +
+      (approximate ? ` · продукт приблизительно: ${approximate}` : '') +
+      (incomplete.length ? ' · результат неполный' : '') +
       (foreignCount
         ? ` · с внешних карт скрыто: ${foreignCount}`
         : includeForeignCards && foreignTotal
@@ -1123,7 +1278,20 @@ async function run() {
 
     const notes = [];
     if (failed) notes.push(`Строк в статусах «Ошибка»/«Отменено»: ${failed}; в итоги не включены.`);
+    if (invalid) notes.push(`Строк с некорректными данными (в итоги не включены): ${invalid}.`);
     if (unknown) notes.push(`Без карты/счёта: ${unknown}.`);
+    if (approximate) {
+      notes.push(
+        `Карта/счёт определены приблизительно (банк принял только широкую форму фильтра): ${approximate}.`,
+      );
+    }
+    if (missingId) notes.push(`Операций без ID: ${missingId}; дедупликация по отпечатку записи.`);
+    if (duplicates) notes.push(`Отброшено дубликатов: ${duplicates}.`);
+    if (incomplete.length) {
+      notes.push(
+        `Результат неполный: ${incomplete.join('; ')}. Выгрузка может быть неполной за выбранный период.`,
+      );
+    }
     if (foreignCount) notes.push(`Скрыто операций с карт других банков: ${foreignCount}.`);
     else if (includeForeignCards && foreignTotal) {
       notes.push(`Включены операции с карт других банков: ${foreignTotal}.`);
@@ -1143,12 +1311,17 @@ async function run() {
     const size = await downloadWorkbook(sheets, filename);
 
     progress(100, `Готово: ${filename} (${Math.round(size / 1024)} КБ)`);
+    const incompleteNotice = incomplete.length
+      ? `Внимание: результат неполный (${incomplete.join('; ')}). `
+      : '';
     setStatus(
-      `Экспортировано операций: ${rows.length}. ` +
+      incompleteNotice +
+        `Экспортировано операций: ${rows.length}. ` +
         (unknown ? `Карта/счёт не определены у ${unknown}. ` : 'Карта/счёт определены у всех. ') +
+        (invalid ? `С некорректными данными: ${invalid}. ` : '') +
         (foreignCount ? `Скрыто операций с карт других банков: ${foreignCount}. ` : '') +
         `Файл «${filename}» сохранён в загрузки.`,
-      'ok',
+      incomplete.length ? 'warn' : 'ok',
     );
   } catch (error) {
     hideProgress();
