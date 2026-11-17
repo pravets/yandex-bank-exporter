@@ -300,6 +300,7 @@ const SUITES = [
   'busy.mjs',
   'diagnostics.mjs',
   'content.mjs',
+  'release-build.mjs',
 ];
 for (const suite of SUITES) {
   const result = spawnSync(process.execPath, [join(here, suite)], { encoding: 'utf8' });
