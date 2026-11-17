@@ -25,6 +25,10 @@
     agreementId: null,
     filterType: null,
     at: 0,
+    // Время загрузки документа: попап отличает свежий снимок от снимка прошлой загрузки.
+    pageTimeOrigin: typeof performance !== 'undefined' ? performance.timeOrigin : 0,
+    // Сколько GraphQL-запросов пришло в форме, которую мы не разбираем (не строка).
+    unsupportedForms: 0,
     // ответ банка (необязателен): используется только для диагностики
     responseAt: 0,
     responseSample: null,
@@ -159,36 +163,57 @@
       try {
         const input = args[0];
         const init = args[1];
-        const url = typeof input === 'string' ? input : input && input.url;
-        if (url && url.indexOf('/graphql') !== -1 && init && typeof init.body === 'string') {
-          const parsed = JSON.parse(init.body);
-          const vars = (parsed && parsed.variables) || {};
-          const persisted = parsed && parsed.extensions && parsed.extensions.persistedQuery;
+        let url = '';
+        let rawBody = null;
+        let method = 'GET';
 
-          record = {
-            operationName: (parsed && parsed.operationName) || '',
-            hash: (persisted && persisted.sha256Hash) || '',
-            variables: trimDeep(vars, 0),
-            at: Date.now(),
-            responseKeys: null,
-            response: null,
-          };
-          recordOperation(record);
+        if (typeof input === 'string') {
+          url = input;
+          method = (init && init.method) || 'GET';
+        } else if (input && typeof input === 'object') {
+          // fetch(new URL(...)) и fetch(new Request(...)): URL и метод берём из объекта.
+          if (typeof input.href === 'string') url = input.href;
+          else if (typeof input.url === 'string') url = input.url;
+          method = (init && init.method) || input.method || 'GET';
+        }
+        if (init && typeof init.body === 'string') rawBody = init.body;
 
-          if (init.body.indexOf('GetTransactionsFeedFilters') !== -1) {
-            capture.filtersBody = init.body;
-            record.kind = 'filters';
-          }
+        const isGraphql = url && url.indexOf('/graphql') !== -1;
+        if (isGraphql && String(method).toUpperCase() === 'POST') {
+          if (rawBody == null) {
+            // Тело не строка (FormData/Blob/поток): перехватить форму нельзя,
+            // но это видно в диагностике, а не молчит.
+            capture.unsupportedForms = (capture.unsupportedForms || 0) + 1;
+          } else {
+            const parsed = JSON.parse(rawBody);
+            const vars = (parsed && parsed.variables) || {};
+            const persisted = parsed && parsed.extensions && parsed.extensions.persistedQuery;
 
-          if (init.body.indexOf('GetTransactionFeedView') !== -1) {
-            capture.body = init.body;
-            capture.agreementId = vars.agreementId || capture.agreementId;
-            capture.filterType = vars.filterType || null;
-            capture.at = Date.now();
-            feedMeta = {
-              agreementId: vars.agreementId || null,
-              filterType: vars.filterType || null,
+            record = {
+              operationName: (parsed && parsed.operationName) || '',
+              hash: (persisted && persisted.sha256Hash) || '',
+              variables: trimDeep(vars, 0),
+              at: Date.now(),
+              responseKeys: null,
+              response: null,
             };
+            recordOperation(record);
+
+            if (rawBody.indexOf('GetTransactionsFeedFilters') !== -1) {
+              capture.filtersBody = rawBody;
+              record.kind = 'filters';
+            }
+
+            if (rawBody.indexOf('GetTransactionFeedView') !== -1) {
+              capture.body = rawBody;
+              capture.agreementId = vars.agreementId || capture.agreementId;
+              capture.filterType = vars.filterType || null;
+              capture.at = Date.now();
+              feedMeta = {
+                agreementId: vars.agreementId || null,
+                filterType: vars.filterType || null,
+              };
+            }
           }
         }
       } catch (e) {
@@ -197,8 +222,12 @@
 
       const pending = originalFetch.apply(this, args);
 
-      // Клонируем ответ сразу, до того как его прочитает страница; ошибки глотаем.
-      if (pending && typeof pending.then === 'function') {
+      // Ответ читаем только у распознанной целевой операции: для чужих запросов
+      // clone()/json() тратили бы CPU и память на разбор всего ответа.
+      const shouldReadResponse = !!(feedMeta || (record && record.kind === 'filters'));
+      if (record && !shouldReadResponse) record.responseSkipped = true;
+
+      if (shouldReadResponse && pending && typeof pending.then === 'function') {
         try {
           pending
             .then((response) => {
@@ -210,8 +239,7 @@
                   .then((json) => {
                     try {
                       if (feedMeta) captureResponse(json, feedMeta);
-                      if (record && record.kind === 'filters') captureFilters(json);
-                      else if (record && !feedMeta) recordOperationResponse(record, json);
+                      else captureFilters(json);
                     } catch (e) {
                       /* образец необязателен */
                     }

@@ -108,6 +108,19 @@ function setBusy(busy) {
   $('withTransfers').disabled = busy;
   $('withForeignCards').disabled = busy;
   $('diag').disabled = busy;
+  const full = $('diagFull');
+  if (full) full.disabled = busy;
+}
+
+/**
+ * Захватывает блокировку синхронно, до первого await: иначе два быстрых клика
+ * проходят проверку `state.busy` одновременно и запускают две операции.
+ * Возвращает false, если операция уже идёт.
+ */
+function tryBeginBusy() {
+  if (state.busy) return false;
+  setBusy(true);
+  return true;
 }
 
 function progress(value, text) {
@@ -128,8 +141,15 @@ function hideProgress() {
   $('pinfo').textContent = '';
 }
 
+/**
+ * Округление денег до копеек, half-up по десятичному представлению.
+ * `(10.075).toFixed(2)` даёт 10.07 из-за двоичного представления, поэтому
+ * масштабируем и срезаем двоичный шум через toPrecision, и только потом округляем.
+ */
 function round2(value) {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+  if (!Number.isFinite(value)) return value;
+  const scaled = Number((Math.abs(value) * 100).toPrecision(15));
+  return Math.sign(value) * (Math.round(scaled) / 100);
 }
 
 // ------------------------------------------------------------------ вкладка и перехват
@@ -158,78 +178,161 @@ async function readCapture(tabId) {
   }
 }
 
-async function waitForCapture(tabId, timeoutMs) {
+async function waitForCapture(tabId, timeoutMs, accept) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const capture = await readCapture(tabId);
-    if (capture && capture.body) return capture;
+    if (capture && capture.body && (!accept || (await accept(capture)))) return capture;
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
   return null;
 }
 
+/** Origin текущего документа вкладки: отличает старый снимок от свежего. */
+async function readPageTimeOrigin(tabId) {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => performance.timeOrigin,
+    });
+    return result ? result.result : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
- * Один запрос страницы истории выполняется внутри вкладки (MAIN world):
- * так работают cookies и не нужен отдельный бэкенд.
+ * Снимок годится, только если он сделан после команды обновления и принадлежит
+ * текущему документу вкладки. Одного сравнения времени мало: старый документ
+ * может ответить позже, поэтому сверяем ещё и origin загрузки.
+ */
+function isFreshCapture(capture, t0, liveOrigin) {
+  if (!capture || !capture.body) return false;
+  if (!Number.isFinite(capture.at) || capture.at < t0) return false;
+  if (liveOrigin == null || capture.pageTimeOrigin == null) return false;
+  return capture.pageTimeOrigin === liveOrigin;
+}
+
+/**
+ * Один GraphQL-запрос выполняется внутри вкладки (MAIN world): так работают
+ * cookies и сессия банка, и не нужен отдельный бэкенд.
  *
- * `filter` — продукт из GetTransactionsFeedFilters: { filterType, agreementId }.
+ * Единственная точка исполнения запросов: пагинация, образец ответа и список
+ * фильтров отличаются только `spec`, а не копией обвязки.
+ *
+ * spec:
+ *   filter    — { filterType, agreementId }; null удаляет переменные фильтра,
+ *               undefined оставляет их как в шаблоне;
+ *   size      — размер страницы (переменная `size`);
+ *   cursor    — курсор; null удаляет его из переменных;
+ *   timeoutMs — дедлайн запроса, по умолчанию 30 с.
+ *
+ * Возвращает { json } или { error, code }:
+ * template | network | timeout | http | json | graphql | inject.
+ */
+async function graphql(tabId, bodyTemplate, spec) {
+  const options = spec || {};
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [bodyTemplate, options],
+      func: async (bodyTemplateInPage, specInPage) => {
+        const timeoutMs = (specInPage && specInPage.timeoutMs) || 30000;
+        let body;
+        try {
+          body = JSON.parse(bodyTemplateInPage);
+        } catch (e) {
+          return { error: 'Не удалось прочитать шаблон запроса', code: 'template' };
+        }
+
+        const vars = body.variables || (body.variables = {});
+        if (specInPage && 'filter' in specInPage) {
+          delete vars.filterType;
+          delete vars.agreementId;
+          const filter = specInPage.filter;
+          if (filter) {
+            if (filter.filterType) vars.filterType = filter.filterType;
+            if (filter.agreementId) vars.agreementId = filter.agreementId;
+          }
+        }
+        if (specInPage && specInPage.size) vars.size = specInPage.size;
+        if (specInPage && 'cursor' in specInPage) {
+          if (specInPage.cursor) vars.cursor = specInPage.cursor;
+          else delete vars.cursor;
+        }
+
+        const persisted = body.extensions && body.extensions.persistedQuery;
+        const hash = persisted && persisted.sha256Hash;
+        const url = '/graphql' + (hash ? '?operationId=' + encodeURIComponent(hash) : '');
+
+        // Дедлайн покрывает и ожидание ответа, и чтение тела: зависший запрос
+        // банка не должен держать попап занятым до закрытия вкладки.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          let response;
+          try {
+            response = await fetch(url, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify(body),
+              signal: controller.signal,
+            });
+          } catch (e) {
+            const aborted = e && (e.name === 'AbortError' || controller.signal.aborted);
+            return aborted
+              ? { error: 'Таймаут запроса к банку', code: 'timeout' }
+              : { error: 'Сеть: ' + (e && e.message ? e.message : e), code: 'network' };
+          }
+          if (!response.ok) {
+            return { error: 'HTTP ' + response.status, code: 'http', status: response.status };
+          }
+          let json;
+          try {
+            json = await response.json();
+          } catch (e) {
+            return controller.signal.aborted
+              ? { error: 'Таймаут чтения ответа', code: 'timeout' }
+              : { error: 'Ответ не JSON', code: 'json' };
+          }
+          if (json.errors && json.errors.length) {
+            return { error: 'GraphQL: ' + json.errors[0].message, code: 'graphql' };
+          }
+          return { json };
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    });
+    return result && result.result
+      ? result.result
+      : { error: 'Вкладка не вернула ответ', code: 'inject' };
+  } catch (e) {
+    // Ошибка executeScript (вкладка закрыта, нет прав) не должна улетать наружу.
+    return {
+      error: 'Не удалось выполнить запрос во вкладке: ' + (e && e.message ? e.message : e),
+      code: 'inject',
+    };
+  }
+}
+
+/**
+ * Страница истории. `filter` — продукт из GetTransactionsFeedFilters.
  * Без фильтра берётся общая лента «Все».
  */
 async function fetchPage(tabId, template, cursor, filter) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    args: [template, cursor || null, filter || null],
-    func: async (bodyTemplate, nextCursor, selected) => {
-      let body;
-      try {
-        body = JSON.parse(bodyTemplate);
-      } catch (e) {
-        return { error: 'Не удалось прочитать шаблон запроса' };
-      }
-      const vars = body.variables || (body.variables = {});
-      delete vars.filterType;
-      delete vars.agreementId;
-      if (selected) {
-        if (selected.filterType) vars.filterType = selected.filterType;
-        if (selected.agreementId) vars.agreementId = selected.agreementId;
-      }
-      vars.size = 50;
-      if (nextCursor) vars.cursor = nextCursor;
-      else delete vars.cursor;
-
-      const persisted = body.extensions && body.extensions.persistedQuery;
-      const hash = persisted && persisted.sha256Hash;
-      const url = '/graphql' + (hash ? '?operationId=' + encodeURIComponent(hash) : '');
-
-      let response;
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(body),
-        });
-      } catch (e) {
-        return { error: 'Сеть: ' + e.message };
-      }
-      if (!response.ok) return { error: 'HTTP ' + response.status };
-
-      let json;
-      try {
-        json = await response.json();
-      } catch (e) {
-        return { error: 'Ответ не JSON' };
-      }
-      if (json.errors && json.errors.length) {
-        return { error: 'GraphQL: ' + json.errors[0].message };
-      }
-      const feed = json.data && json.data.getTransactionsFeedView;
-      if (!feed) return { error: 'В ответе нет getTransactionsFeedView' };
-      return { items: feed.items || [], cursor: feed.cursor || null };
-    },
+  const response = await graphql(tabId, template, {
+    filter: filter || null,
+    size: PAGE_SIZE,
+    cursor: cursor || null,
   });
-  return result ? result.result : null;
+  if (response.error) return { error: response.error };
+  const feed = response.json && response.json.data && response.json.data.getTransactionsFeedView;
+  if (!feed) return { error: 'В ответе нет getTransactionsFeedView' };
+  return { items: feed.items || [], cursor: feed.cursor || null };
 }
 
 /**
@@ -237,55 +340,11 @@ async function fetchPage(tabId, template, cursor, filter) {
  * реально приходят от банка. Возвращает до 5 операций как есть.
  */
 async function fetchRawSample(tabId, template) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    args: [template],
-    func: async (bodyTemplate) => {
-      let body;
-      try {
-        body = JSON.parse(bodyTemplate);
-      } catch (e) {
-        return { error: 'Не удалось прочитать шаблон запроса' };
-      }
-      const vars = body.variables || (body.variables = {});
-      // Всегда общая лента «Все»: фильтр страницы мог скрыть карту/счёт.
-      delete vars.filterType;
-      vars.size = 5;
-      delete vars.cursor;
-
-      const persisted = body.extensions && body.extensions.persistedQuery;
-      const hash = persisted && persisted.sha256Hash;
-      const url = '/graphql' + (hash ? '?operationId=' + encodeURIComponent(hash) : '');
-
-      let response;
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(body),
-        });
-      } catch (e) {
-        return { error: 'Сеть: ' + e.message };
-      }
-      if (!response.ok) return { error: 'HTTP ' + response.status };
-
-      let json;
-      try {
-        json = await response.json();
-      } catch (e) {
-        return { error: 'Ответ не JSON' };
-      }
-      if (json.errors && json.errors.length) {
-        return { error: 'GraphQL: ' + json.errors[0].message };
-      }
-      const feed = json.data && json.data.getTransactionsFeedView;
-      if (!feed) return { error: 'В ответе нет getTransactionsFeedView' };
-      return { items: (feed.items || []).slice(0, 5), feedKeys: Object.keys(feed) };
-    },
-  });
-  return result ? result.result : null;
+  const response = await graphql(tabId, template, { filter: null, size: 5, cursor: null });
+  if (response.error) return { error: response.error };
+  const feed = response.json && response.json.data && response.json.data.getTransactionsFeedView;
+  if (!feed) return { error: 'В ответе нет getTransactionsFeedView' };
+  return { items: (feed.items || []).slice(0, 5), feedKeys: Object.keys(feed) };
 }
 
 // ------------------------------------------------------------------ данные
@@ -295,54 +354,16 @@ async function fetchRawSample(tabId, template) {
  * этот запрос — запасной путь, если ответ не успел прийти.
  */
 async function fetchFilters(tabId, template) {
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    args: [template],
-    func: async (bodyTemplate) => {
-      let body;
-      try {
-        body = JSON.parse(bodyTemplate);
-      } catch (e) {
-        return { error: 'Не удалось прочитать шаблон запроса' };
-      }
-      const persisted = body.extensions && body.extensions.persistedQuery;
-      const hash = persisted && persisted.sha256Hash;
-      const url = '/graphql' + (hash ? '?operationId=' + encodeURIComponent(hash) : '');
-
-      let response;
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(body),
-        });
-      } catch (e) {
-        return { error: 'Сеть: ' + e.message };
-      }
-      if (!response.ok) return { error: 'HTTP ' + response.status };
-
-      let json;
-      try {
-        json = await response.json();
-      } catch (e) {
-        return { error: 'Ответ не JSON' };
-      }
-      if (json.errors && json.errors.length) {
-        return { error: 'GraphQL: ' + json.errors[0].message };
-      }
-      const data = json.data && json.data.getTransactionsFeedFilters;
-      const success = data && data.successData;
-      if (!success) return { error: 'В ответе нет getTransactionsFeedFilters' };
-      return {
-        filters: success.filters || [],
-        savingFilters: success.savingFilters || [],
-        customFilters: success.customFilters || [],
-      };
-    },
-  });
-  return result ? result.result : null;
+  const response = await graphql(tabId, template, {});
+  if (response.error) return { error: response.error };
+  const data = response.json && response.json.data && response.json.data.getTransactionsFeedFilters;
+  const success = data && data.successData;
+  if (!success) return { error: 'В ответе нет getTransactionsFeedFilters' };
+  return {
+    filters: success.filters || [],
+    savingFilters: success.savingFilters || [],
+    customFilters: success.customFilters || [],
+  };
 }
 
 function mapItem(item) {
@@ -959,10 +980,64 @@ function filterIdFromUrl(url) {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
-/** Чистая сборка диагностического JSON: без chrome, DOM и сети — удобно тестировать. */
-function buildDiagnostics(capture, tabUrl, version, now) {
+/** Маскирует идентификаторы, оставляя только хвост для сверки версии контракта. */
+function maskId(value) {
+  const text = String(value == null ? '' : value);
+  if (!text) return '';
+  return text.length <= 4 ? '••••' : '••••' + text.slice(-4);
+}
+
+/** Маскирует длинные цифровые последовательности (номера карт и счетов). */
+function maskText(value, limit) {
+  return String(value == null ? '' : value)
+    .replace(/\d{4,}/g, '••••')
+    .slice(0, limit || 60);
+}
+
+/**
+ * Рекурсивно маскирует значения, сохраняя структуру полей.
+ * Идентификаторы (id, agreementId, номер карты) маскируются целиком, числа —
+ * тоже: в обезличенном образце нужны имена полей, а не суммы.
+ */
+const SENSITIVE_KEY = /^(id|agreementId|filterId|operationId|maskedNumber|cardNumber|pan|token|sessionId)$/i;
+
+function maskValue(value, depth, key) {
+  if (typeof value === 'string') {
+    if (key && SENSITIVE_KEY.test(key)) return maskId(value);
+    return maskText(value, 60);
+  }
+  if (typeof value === 'number') return '••••';
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= 6) return '…';
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => maskValue(entry, depth + 1, key));
+  const out = {};
+  for (const field of Object.keys(value)) out[field] = maskValue(value[field], depth + 1, field);
+  return out;
+}
+
+function maskFilter(filter) {
+  return {
+    filterType: (filter && filter.filterType) || '',
+    id: filter && filter.id ? maskId(filter.id) : '',
+    hasAgreementId: !!(filter && filter.agreementId),
+    name: maskText((filter && filter.name) || '', 40),
+    secondName: filter && filter.secondName ? '••••' : null,
+  };
+}
+
+/**
+ * Чистая сборка диагностического JSON: без chrome, DOM и сети — удобно тестировать.
+ *
+ * По умолчанию файл обезличен: структура полей и имена операций, но без сумм,
+ * номеров карт, agreementId и тела запроса. Полный состав — только по явному
+ * запросу (`options.full`), с предупреждением в интерфейсе.
+ */
+function buildDiagnostics(capture, tabUrl, version, now, options) {
+  const full = !!(options && options.full);
   const sample = (capture && capture.responseSample) || null;
-  const items = sample && Array.isArray(sample.items) ? sample.items : [];
+  const rawItems = sample && Array.isArray(sample.items) ? sample.items : [];
+  const items = full ? rawItems : rawItems.map((item) => maskValue(item, 0));
+
   let parsedBody = null;
   try {
     parsedBody = capture && capture.body ? JSON.parse(capture.body) : null;
@@ -972,16 +1047,53 @@ function buildDiagnostics(capture, tabUrl, version, now) {
   const request = (sample && sample.request) || {};
   const vars = (parsedBody && parsedBody.variables) || {};
   const at = capture && capture.responseAt ? capture.responseAt : now;
+  const agreementId = request.agreementId || (capture && capture.agreementId) || vars.agreementId || '';
+  const filterId = filterIdFromUrl(tabUrl);
+
+  const operations = capture && Array.isArray(capture.operations) ? capture.operations : [];
+  const journal = full
+    ? operations
+    : operations.map((entry) => ({
+        operationName: entry.operationName || '',
+        hash: entry.hash ? maskId(entry.hash) : '',
+        variablesKeys:
+          entry.variables && typeof entry.variables === 'object'
+            ? Object.keys(entry.variables)
+            : [],
+        at: entry.at || null,
+        responseSkipped: !!entry.responseSkipped,
+        responseKeys: Array.isArray(entry.responseKeys) ? entry.responseKeys.slice(0, 40) : null,
+      }));
+
+  const filters = (capture && capture.filters) || null;
+  const feedFilters =
+    full || !filters
+      ? filters
+      : {
+          filters: (filters.filters || []).map(maskFilter),
+          savingFilters: (filters.savingFilters || []).map(maskFilter),
+          customFilters: (filters.customFilters || []).map(maskFilter),
+        };
+
   return {
     generatedAt: new Date(now == null ? Date.now() : now).toISOString(),
     extensionVersion: version || '',
-    tabUrl: tabUrl || '',
+    masked: !full,
+    // В обезличенном режиме query-строка отбрасывается: в ней filterId.
+    tabUrl: full ? tabUrl || '' : String(tabUrl || '').split('?')[0],
     request: {
-      filterIdFromUrl: filterIdFromUrl(tabUrl),
-      agreementId: request.agreementId || (capture && capture.agreementId) || vars.agreementId || '',
+      filterIdFromUrl: filterId ? (full ? filterId : maskId(filterId)) : '',
+      agreementId: full ? agreementId : maskId(agreementId),
       filterType: request.filterType || (capture && capture.filterType) || vars.filterType || null,
-      variables: (parsedBody && parsedBody.variables) || null,
-      body: (capture && capture.body) || null,
+      variables: full
+        ? (parsedBody && parsedBody.variables) || null
+        : {
+            redacted: true,
+            keys: parsedBody && parsedBody.variables ? Object.keys(parsedBody.variables) : [],
+          },
+      body: full
+        ? (capture && capture.body) || null
+        : { redacted: true, length: capture && capture.body ? capture.body.length : 0 },
     },
     feed: {
       keys: (sample && sample.feedKeys) || [],
@@ -989,18 +1101,34 @@ function buildDiagnostics(capture, tabUrl, version, now) {
       sampledAt: at ? new Date(at).toISOString() : '',
     },
     items,
-    operations:
-      capture && Array.isArray(capture.operations) ? capture.operations : [],
-    feedFilters: (capture && capture.filters) || null,
+    operations: journal,
+    feedFilters,
+    unsupportedForms: (capture && capture.unsupportedForms) || 0,
     paths:
       sample && Array.isArray(sample.paths) && sample.paths.length
         ? sample.paths
-        : collectKeyPaths(items),
+        : collectKeyPaths(rawItems),
+  };
+}
+
+function maskPageFilters(pageFilters) {
+  if (!pageFilters || pageFilters.error) return pageFilters;
+  return {
+    url: String(pageFilters.url || '').split('?')[0],
+    title: maskText(pageFilters.title || '', 60),
+    candidates: (pageFilters.candidates || []).map((candidate) => ({
+      text: maskText(candidate.text, 60),
+      testId: candidate.testId || '',
+      role: candidate.role || '',
+      tag: candidate.tag || '',
+    })),
   };
 }
 
 function refreshDiagnostics() {
-  show('diag', hasResponseSample(state.capture));
+  const ready = hasResponseSample(state.capture);
+  show('diag', ready);
+  show('diagFullWrap', ready);
 }
 
 /** Снимок фильтров карт/счетов из интерфейса истории: ссылки и подписи. */
@@ -1045,111 +1173,123 @@ async function readHistoryFilters(tabId) {
 }
 
 async function downloadDiagnostics() {
-  if (state.busy) return;
+  // Блокировка берётся синхронно, до первого await — как у экспорта.
+  if (!tryBeginBusy()) return;
 
-  const fresh = state.tabId ? await readCapture(state.tabId) : null;
-  let capture = fresh || state.capture;
-  if (!capture || !capture.body) {
-    setStatus('Сначала откройте страницу истории платежей — без неё образец не собрать.', 'warn');
-    return;
-  }
+  try {
+    const fresh = state.tabId ? await readCapture(state.tabId) : null;
+    let capture = fresh || state.capture;
+    if (!capture || !capture.body) {
+      setStatus('Сначала откройте страницу истории платежей — без неё образец не собрать.', 'warn');
+      return;
+    }
 
-  setStatus('Запрашиваю образец ответа…', 'info');
-  if (state.tabId) {
-    const sample = await fetchRawSample(state.tabId, capture.body);
-    if (sample && !sample.error && Array.isArray(sample.items) && sample.items.length) {
-      capture = {
-        ...capture,
-        responseAt: Date.now(),
-        responseSample: {
-          items: sample.items,
-          paths: collectKeyPaths(sample.items),
-          feedKeys: sample.feedKeys || [],
-          itemCount: sample.items.length,
-          request: { agreementId: capture.agreementId || '', filterType: null },
-        },
-      };
-    } else if (!hasResponseSample(capture)) {
+    if (state.tabId) {
+      setStatus('Запрашиваю образец ответа…', 'info');
+      const sample = await fetchRawSample(state.tabId, capture.body);
+      if (sample && !sample.error && Array.isArray(sample.items) && sample.items.length) {
+        capture = {
+          ...capture,
+          responseAt: Date.now(),
+          responseSample: {
+            items: sample.items,
+            paths: collectKeyPaths(sample.items),
+            feedKeys: sample.feedKeys || [],
+            itemCount: sample.items.length,
+            request: { agreementId: capture.agreementId || '', filterType: null },
+          },
+        };
+      } else if (!hasResponseSample(capture)) {
+        setStatus(
+          (sample && sample.error) ||
+            'Не удалось получить образец ответа. Обновите страницу истории и повторите.',
+          'error',
+        );
+        return;
+      }
+    }
+
+    if (!hasResponseSample(capture)) {
       setStatus(
-        (sample && sample.error) || 'Не удалось получить образец ответа. Обновите страницу истории и повторите.',
-        'error',
+        'Образец ответа ещё не пойман. Обновите страницу истории платежей и откройте попап снова.',
+        'warn',
       );
       return;
     }
-  }
 
-  if (!hasResponseSample(capture)) {
-    setStatus(
-      'Образец ответа ещё не пойман. Обновите страницу истории платежей и откройте попап снова.',
-      'warn',
-    );
-    return;
-  }
-
-  state.capture = capture;
-  let version = '';
-  try {
-    version = chrome.runtime.getManifest().version;
-  } catch (e) {
-    version = '';
-  }
-
-  const data = buildDiagnostics(capture, state.tabUrl, version, Date.now());
-  if (state.tabId) {
+    state.capture = capture;
+    let version = '';
     try {
-      data.pageFilters = await readHistoryFilters(state.tabId);
+      version = chrome.runtime.getManifest().version;
     } catch (e) {
-      data.pageFilters = { error: e && e.message ? e.message : String(e) };
+      version = '';
     }
-  }
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = `yandex-pay-sample-${stamp}.json`;
-  try {
+
+    const fullNode = $('diagFull');
+    const full = !!(fullNode && fullNode.checked);
+    const data = buildDiagnostics(capture, state.tabUrl, version, Date.now(), { full });
+
+    if (state.tabId) {
+      try {
+        const pageFilters = await readHistoryFilters(state.tabId);
+        data.pageFilters = full ? pageFilters : maskPageFilters(pageFilters);
+      } catch (e) {
+        data.pageFilters = { error: e && e.message ? e.message : String(e) };
+      }
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `yandex-pay-sample-${stamp}${full ? '-full' : ''}.json`;
     const bytes = new TextEncoder().encode(JSON.stringify(data, null, 2));
     await downloadBlob(bytes, 'application/json', filename);
     setStatus(
-      `Образец сохранён: ${filename}. Внутри реальные операции — файл никуда не отправляется.`,
+      full
+        ? `Полный образец сохранён: ${filename}. Внутри реальные операции и параметры — файл никуда не отправляется.`
+        : `Обезличенный образец сохранён: ${filename}. Суммы, номера и идентификаторы замаскированы; файл никуда не отправляется.`,
       'ok',
     );
   } catch (error) {
     setStatus(
-      'Не удалось сохранить образец: ' + (error && error.message ? error.message : error),
+      'Не удалось собрать образец: ' + (error && error.message ? error.message : error),
       'error',
     );
+  } finally {
+    setBusy(false);
   }
 }
 
 // ------------------------------------------------------------------ основной сценарий
 
 async function run() {
-  if (state.busy) return;
+  // Блокировку берём до первого await: иначе два вызова проходят проверку
+  // одновременно и запускают два скачивания.
+  if (!tryBeginBusy()) return;
 
-  // Календарный контракт МСК проверяем до любых сетевых запросов истории.
-  const period = getPeriod();
-  if (period.invalidReason) {
-    setStatus(period.invalidReason, 'error');
-    return;
-  }
-
-  if (!state.tabId) {
-    setStatus('Сначала откройте страницу истории платежей — без неё расширение не узнает параметры запроса.', 'warn');
-    return;
-  }
-
-  // Живой снимок страницы: к моменту экспорта там уже есть и тело запроса, и фильтры.
-  const fresh = await readCapture(state.tabId);
-  const capture = fresh || state.capture;
-  if (!capture || !capture.body) {
-    setStatus('Сначала откройте страницу истории платежей — без неё расширение не узнает параметры запроса.', 'warn');
-    return;
-  }
-  state.capture = capture;
-
-  setBusy(true);
   hideProgress();
   show('retry', false);
 
   try {
+    // Календарный контракт МСК проверяем до любых сетевых запросов истории.
+    const period = getPeriod();
+    if (period.invalidReason) {
+      setStatus(period.invalidReason, 'error');
+      return;
+    }
+
+    if (!state.tabId) {
+      setStatus('Сначала откройте страницу истории платежей — без неё расширение не узнает параметры запроса.', 'warn');
+      return;
+    }
+
+    // Живой снимок страницы: к моменту экспорта там уже есть и тело запроса, и фильтры.
+    const fresh = await readCapture(state.tabId);
+    const capture = fresh || state.capture;
+    if (!capture || !capture.body) {
+      setStatus('Сначала откройте страницу истории платежей — без неё расширение не узнает параметры запроса.', 'warn');
+      return;
+    }
+    state.capture = capture;
+
     const includeTransfers = $('withTransfers').checked;
     const includeForeignCards = $('withForeignCards').checked;
 
@@ -1342,19 +1482,23 @@ async function run() {
 }
 
 async function prepare() {
-  if (state.busy) return;
-  if (!state.tabId) {
-    await locateTab();
-    return;
-  }
+  // Блокировка до первого await: locateTab() внутри тоже ждёт вкладку.
+  if (!tryBeginBusy()) return;
 
-  setBusy(true);
   hideProgress();
   show('retry', false);
-  const onHistory = /\/my\/history/.test(state.tabUrl || '');
-  setStatus(onHistory ? 'Обновляю страницу истории…' : 'Открываю историю платежей…', 'info');
 
   try {
+    if (!state.tabId) {
+      await locateTab();
+      return;
+    }
+
+    const onHistory = /\/my\/history/.test(state.tabUrl || '');
+    setStatus(onHistory ? 'Обновляю страницу истории…' : 'Открываю историю платежей…', 'info');
+
+    // Запоминаем момент до команды: снимок старше него — это данные прошлой загрузки.
+    const t0 = Date.now();
     if (onHistory) {
       await chrome.tabs.reload(state.tabId);
     } else {
@@ -1362,7 +1506,10 @@ async function prepare() {
         url: 'https://bank.yandex.ru/my/history',
       });
     }
-    const capture = await waitForCapture(state.tabId, 20000);
+    const capture = await waitForCapture(state.tabId, 20000, async (candidate) => {
+      const liveOrigin = await readPageTimeOrigin(state.tabId);
+      return isFreshCapture(candidate, t0, liveOrigin);
+    });
     if (!capture || !capture.body) {
       throw new Error('Не дождался загрузки истории. Проверьте, что вы вошли в аккаунт, и нажмите «Повторить».');
     }

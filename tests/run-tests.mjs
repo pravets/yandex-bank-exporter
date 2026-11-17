@@ -221,6 +221,7 @@ const diagnostics = globalThis.buildDiagnostics(
   'https://bank.yandex.ru/my/history?filterId=PAY_CARD-1-pa_TEST',
   '1.1.0',
   Date.parse('2026-11-17T10:05:00Z'),
+  { full: true },
 );
 
 assert.equal(diagnostics.generatedAt, '2026-11-17T10:05:00.000Z');
@@ -237,7 +238,13 @@ assert.equal(diagnostics.operations[0].operationName, 'GetTransactionFeedView');
 assert.equal(diagnostics.feedFilters, null);
 assert.ok(diagnostics.paths.includes('account.maskedNumber'));
 
-const noSample = globalThis.buildDiagnostics({ body: requestBody }, 'https://bank.yandex.ru/', '', 0);
+const noSample = globalThis.buildDiagnostics(
+  { body: requestBody },
+  'https://bank.yandex.ru/',
+  '',
+  0,
+  { full: true },
+);
 assert.deepEqual(noSample.items, []);
 assert.deepEqual(noSample.operations, []);
 assert.equal(noSample.feed.itemCount, 0);
@@ -282,7 +289,17 @@ if (spawnBlocked) {
 
 // ---------- остальные наборы проверок ----------
 // Каждый файл — самостоятельный процесс со своими моками globalThis.
-const SUITES = ['pagination.mjs', 'transfers.mjs', 'money.mjs', 'dedupe.mjs'];
+const SUITES = [
+  'pagination.mjs',
+  'transfers.mjs',
+  'money.mjs',
+  'dedupe.mjs',
+  'xml.mjs',
+  'prepare.mjs',
+  'busy.mjs',
+  'diagnostics.mjs',
+  'content.mjs',
+];
 for (const suite of SUITES) {
   const result = spawnSync(process.execPath, [join(here, suite)], { encoding: 'utf8' });
   if (result.error && (result.error.code === 'EPERM' || result.error.code === 'ENOENT')) {

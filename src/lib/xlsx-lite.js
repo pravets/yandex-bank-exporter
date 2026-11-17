@@ -119,14 +119,34 @@
   }
 
   // ---------- OOXML ----------
+  /**
+   * Удаляет кодовые точки, недопустимые в XML 1.0: управляющие (кроме TAB/LF/CR),
+   * одиночные суррогаты и noncharacters (U+FDD0–U+FDEF, U+xxFFFE/U+xxFFFF).
+   * Без этого Excel не открывает книгу: парсер падает на `not well-formed`.
+   */
+  function stripInvalidXml(text) {
+    let out = '';
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      if (cp === 0x9 || cp === 0xa || cp === 0xd) {
+        out += ch;
+        continue;
+      }
+      if (cp < 0x20) continue;
+      if (cp >= 0xd800 && cp <= 0xdfff) continue; // одиночный суррогат
+      if (cp >= 0xfdd0 && cp <= 0xfdef) continue;
+      if ((cp & 0xffff) === 0xfffe || (cp & 0xffff) === 0xffff) continue;
+      out += ch;
+    }
+    return out;
+  }
+
   function esc(value) {
-    return String(value)
+    return stripInvalidXml(String(value))
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      // управляющие символы, недопустимые в XML 1.0
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+      .replace(/"/g, '&quot;');
   }
 
   function colName(index) {
